@@ -59,6 +59,7 @@ class PlyReader:
         self._properties: list[PlyProperty] = []
         self._property_map: dict[str, PlyProperty] = {}
         self._data: bytes = b""
+        self._structured_arr: np.ndarray | None = None
         self._load(file_path)
 
     def _load(self, file_path: str):
@@ -122,6 +123,11 @@ class PlyReader:
         if self.vertex_count == 0 or not self._properties:
             raise IOError("No vertex element or properties found in PLY header")
 
+    def _build_structured_array(self):
+        """Build a numpy structured array for fast per-property access."""
+        dt = np.dtype([(p.name, p.dtype) for p in self._properties])
+        self._structured_arr = np.frombuffer(self._data, dtype=dt, count=self.vertex_count)
+
     def has_property(self, name: str) -> bool:
         return name in self._property_map
 
@@ -131,11 +137,9 @@ class PlyReader:
         if prop is None:
             raise KeyError(f"Property '{name}' not found in PLY. "
                            f"Available: {list(self._property_map.keys())}")
-        # Use numpy structured view for efficient extraction
-        buf = np.frombuffer(self._data, dtype=np.uint8)
-        buf = buf.reshape(self.vertex_count, self._vertex_stride)
-        col = buf[:, prop.offset:prop.offset + prop.size]
-        return np.frombuffer(col.tobytes(), dtype=prop.dtype)
+        if self._structured_arr is None:
+            self._build_structured_array()
+        return self._structured_arr[name]
 
     def get_properties_array(self, names: list[str]) -> np.ndarray:
         """Return a 2-D numpy array of shape (vertex_count, len(names)).

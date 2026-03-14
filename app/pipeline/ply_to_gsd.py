@@ -12,6 +12,7 @@ import os
 import struct
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Callable, Optional
 
 import numpy as np
@@ -60,6 +61,51 @@ def _textures_to_shuffled_blob(
     return b"".join(parts)
 
 
+def _process_single_frame(args: tuple) -> tuple[int, bytes, dict, int]:
+    """Process a single PLY frame into a compressed blob. Designed for multiprocessing."""
+    (
+        frame_idx, ply_path, precisions, num_sh,
+        prune_keep_ratio,
+    ) = args
+
+    gaussians = load_gaussian_ply(ply_path)
+
+    if prune_keep_ratio is not None and prune_keep_ratio < 1.0:
+        gaussians = _prune_by_contribution(gaussians, prune_keep_ratio)
+    gaussian_count = len(gaussians["position"])
+
+    sorted_indices, min_pos, max_pos = sort_3d_morton_order(gaussians["position"])
+
+    texture_size = math.ceil(math.sqrt(gaussian_count))
+
+    all_textures = _pack_textures(gaussians, sorted_indices, texture_size)
+    textures = all_textures[:3 + num_sh]
+
+    blob = _textures_to_shuffled_blob(textures, precisions)
+    raw_size = len(blob)
+
+    compressed = lz4.block.compress(blob, store_size=False)
+
+    frame_info = {
+        "compressedSize": len(compressed),
+        "textureWidth": texture_size,
+        "textureHeight": texture_size,
+        "gaussianCount": gaussian_count,
+        "minPosition": {
+            "x": float(min_pos[0]),
+            "y": float(min_pos[1]),
+            "z": float(min_pos[2]),
+        },
+        "maxPosition": {
+            "x": float(max_pos[0]),
+            "y": float(max_pos[1]),
+            "z": float(max_pos[2]),
+        },
+    }
+
+    return frame_idx, compressed, frame_info, raw_size
+
+
 def convert_ply_to_gsd(
     ply_folder: str,
     output_path: str,
@@ -71,6 +117,7 @@ def convert_ply_to_gsd(
     scale_opacity_precision: int = PRECISION_HALF,
     sh_precision: int = PRECISION_HALF,
     prune_keep_ratio: Optional[float] = None,
+    max_workers: Optional[int] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     frame_progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
@@ -87,6 +134,7 @@ def convert_ply_to_gsd(
         scale_opacity_precision: PRECISION_FULL or PRECISION_HALF.
         sh_precision: PRECISION_FULL or PRECISION_HALF.
         prune_keep_ratio: If set, keep top N% by contribution (e.g. 0.5 for 50%).
+        max_workers: Max parallel workers (default: half of CPU cores).
         progress_callback: Callback for log messages.
         frame_progress_callback: Callback (current_frame, total_frames).
 
@@ -119,76 +167,59 @@ def convert_ply_to_gsd(
         scale_opacity_precision,
     ] + [sh_precision] * num_sh
 
-    # Process frames into compressed blobs
-    t0 = time.time()
-    frame_blobs = []
-    frame_infos = []
-    total_raw_size = 0
-    total_compressed_size = 0
-    expected_blob_size = None
+    # Determine worker count
+    if max_workers is None:
+        cpu_count = os.cpu_count() or 4
+        max_workers = max(1, cpu_count // 2)
+    log(f"Using {max_workers} workers")
 
+    # Build task args
+    task_args = []
     for i, ply_file in enumerate(ply_files):
         ply_path = os.path.join(ply_folder, ply_file)
+        task_args.append((
+            i, ply_path, precisions, num_sh,
+            prune_keep_ratio,
+        ))
 
-        # Load PLY
-        gaussians = load_gaussian_ply(ply_path)
-        original_count = len(gaussians["position"])
+    # Process frames in parallel
+    t0 = time.time()
+    results = [None] * frame_count  # preserve order
+    completed_count = 0
+    total_raw_size = 0
+    total_compressed_size = 0
 
-        # Prune
-        if prune_keep_ratio is not None and prune_keep_ratio < 1.0:
-            gaussians = _prune_by_contribution(gaussians, prune_keep_ratio)
-        gaussian_count = len(gaussians["position"])
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_process_single_frame, args): args[0]
+            for args in task_args
+        }
 
-        # Morton sort
-        sorted_indices, min_pos, max_pos = sort_3d_morton_order(gaussians["position"])
+        for future in as_completed(futures):
+            frame_idx, compressed, frame_info, raw_size = future.result()
+            results[frame_idx] = (compressed, frame_info, raw_size)
 
-        # Texture size
-        texture_size = math.ceil(math.sqrt(gaussian_count))
+            completed_count += 1
+            total_raw_size += raw_size
+            total_compressed_size += len(compressed)
 
-        # Pack textures (returns all 15, we only use the ones we need)
-        all_textures = _pack_textures(gaussians, sorted_indices, texture_size)
-        textures = all_textures[:3 + num_sh]
+            if frame_progress_callback:
+                frame_progress_callback(completed_count, frame_count)
 
-        # Convert to shuffled blob
-        blob = _textures_to_shuffled_blob(textures, precisions)
-
-        if expected_blob_size is None:
-            expected_blob_size = len(blob)
-            log(f"Uncompressed frame size: {expected_blob_size / 1e6:.1f} MB")
-            log(f"Texture: {texture_size}x{texture_size}, {gaussian_count} gaussians")
-
-        # LZ4 compress
-        compressed = lz4.block.compress(blob, store_size=False)
-
-        frame_blobs.append(compressed)
-        frame_infos.append({
-            "compressedSize": len(compressed),
-            "textureWidth": texture_size,
-            "textureHeight": texture_size,
-            "gaussianCount": gaussian_count,
-            "minPosition": {
-                "x": float(min_pos[0]),
-                "y": float(min_pos[1]),
-                "z": float(min_pos[2]),
-            },
-            "maxPosition": {
-                "x": float(max_pos[0]),
-                "y": float(max_pos[1]),
-                "z": float(max_pos[2]),
-            },
-        })
-
-        total_raw_size += len(blob)
-        total_compressed_size += len(compressed)
-
-        if frame_progress_callback:
-            frame_progress_callback(i + 1, frame_count)
-
-        if (i + 1) % 50 == 0 or i == frame_count - 1:
-            ratio = total_compressed_size / total_raw_size * 100
-            log(f"  Encoded {i + 1}/{frame_count} frames ({ratio:.1f}%)")
+            if completed_count % 50 == 0 or completed_count == frame_count:
+                ratio = total_compressed_size / total_raw_size * 100
+                log(f"  Encoded {completed_count}/{frame_count} frames ({ratio:.1f}%)")
 
     encode_time = time.time() - t0
+
+    # Unpack results in order
+    frame_blobs = [r[0] for r in results]
+    frame_infos = [r[1] for r in results]
+
+    expected_blob_size = results[0][2]  # raw_size of first frame
+
+    log(f"Uncompressed frame size: {expected_blob_size / 1e6:.1f} MB")
+    log(f"Texture: {frame_infos[0]['textureWidth']}x{frame_infos[0]['textureHeight']}, {frame_infos[0]['gaussianCount']} gaussians")
 
     # Build header
     header = {
@@ -246,6 +277,7 @@ def convert_ply_to_gsd(
     log(f"  Total GSD:       {file_size / 1e9:.2f} GB")
     log(f"  Overall ratio:   {stats['overall_ratio']*100:.1f}%")
     log(f"  Encode time:     {encode_time:.1f}s ({encode_time / frame_count * 1000:.0f}ms/frame)")
+    log(f"  Workers:         {max_workers}")
     log(f"  Output:          {output_path}")
 
     return stats
