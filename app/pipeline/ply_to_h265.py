@@ -185,7 +185,8 @@ def start_encoder(width: int, height: int, fps: int, crf: int,
         "-pix_fmt", "yuv420p",
         "-color_range", "pc",
         "-crf", str(crf),
-        "-x265-params", f"keyint={fps}:min-keyint={fps}:log-level=error:range=full",
+        "-tag:v", "hev1",
+        "-x265-params", f"keyint={fps}:min-keyint={fps}:log-level=error:range=full:no-sao=1:deblock=0,0",
         output_path,
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
