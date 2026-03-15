@@ -6,7 +6,7 @@ import subprocess
 import json
 from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from app.pipeline.ply_to_h265 import quantize_position, quantize_uint8, dequantize_position, dequantize_uint8
+from app.pipeline.ply_to_h265 import quantize_position, quantize_uint8, dequantize_position, dequantize_uint8, convert_ply_to_h265
 from app.pipeline.ply_to_h265 import tile_stream_position, tile_stream_motion, tile_stream_appearance
 from app.pipeline.ply_to_h265 import start_encoder, write_frame, finish_encoder
 from app.pipeline.ply_to_h265 import write_manifest
@@ -158,6 +158,42 @@ def test_manifest_structure():
         assert "position" in m["streams"]
         assert "motion" in m["streams"]
         assert "appearance" in m["streams"]
+
+
+def test_ply_to_h265_integration():
+    """Full pipeline: PLY frames → 3 MP4s + manifest.json."""
+    ply_dir = Path("ref/io-example/step3_image-to-ply/fish-2_ply")
+    if not ply_dir.exists():
+        import pytest
+        pytest.skip("Reference PLY data not available")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = convert_ply_to_h265(
+            ply_dir=str(ply_dir),
+            output_dir=tmp,
+            fps=24,
+            crf_position=20,
+            crf_motion=24,
+            crf_appearance=26,
+        )
+
+        out = Path(tmp)
+        assert (out / "stream_position.mp4").exists()
+        assert (out / "stream_motion.mp4").exists()
+        assert (out / "stream_appearance.mp4").exists()
+
+        with open(out / "manifest.json") as f:
+            m = json.load(f)
+        assert m["frameCount"] == result["frame_count"]
+        assert m["gridWidth"] == result["grid_size"]
+
+        # MP4 files should be much smaller than raw data
+        total_mp4 = sum(f.stat().st_size for f in out.glob("*.mp4"))
+        # Raw per gaussian SH0: pos(12B) + rot(16B) + so(16B) + sh_dc(12B) = 56 bytes (fp32)
+        raw_estimate = result["gaussian_count"] * 56 * result["frame_count"]
+        compression_ratio = raw_estimate / total_mp4
+        print(f"\nCompression ratio: {compression_ratio:.0f}x")
+        assert compression_ratio > 5
 
 
 if __name__ == "__main__":
