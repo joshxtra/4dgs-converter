@@ -106,11 +106,10 @@ def compute_global_bounds(ply_paths: list[Path], sample_ratio: float = 0.1,
             "max": np.percentile(merged, 99.9, axis=0).astype(np.float32),
         }
 
-    # Rotation: fixed bounds [-1, 1]
-    n_rot = activated["rotation"].shape[1]  # 4
+    # Rotation: fixed bounds [-1, 1] (quaternion components always in this range)
     bounds["rotation"] = {
-        "min": np.full(n_rot, -1.0, dtype=np.float32),
-        "max": np.full(n_rot, 1.0, dtype=np.float32),
+        "min": np.full(4, -1.0, dtype=np.float32),
+        "max": np.full(4, 1.0, dtype=np.float32),
     }
 
     return bounds
