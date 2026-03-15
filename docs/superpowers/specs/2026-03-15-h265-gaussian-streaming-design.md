@@ -217,6 +217,8 @@ Feed quantized frame bytes directly via stdin. Eliminates PNG encode/decode over
   "gaussianCount": 1179648,
 
   "requiredCodec": "hev1.1.6.L150.B0",
+  "coordinateSpace": "colmap",
+  "quaternionOrder": "wxyz",
 
   "quantization": {
     "position": {
