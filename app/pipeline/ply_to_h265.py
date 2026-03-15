@@ -113,3 +113,162 @@ def compute_global_bounds(ply_paths: list[Path], sample_ratio: float = 0.1,
     }
 
     return bounds
+
+
+# --- Channel Tiling ---
+
+def _tile_horizontal(arrays: list[np.ndarray], grid_h: int, grid_w: int) -> np.ndarray:
+    """Tile multiple (N,) uint8 arrays horizontally into one row of grid_w-wide columns."""
+    cols = [arr.reshape(grid_h, grid_w) for arr in arrays]
+    return np.concatenate(cols, axis=1)
+
+
+def tile_stream_position(pos_high: np.ndarray, pos_low: np.ndarray,
+                         grid_h: int, grid_w: int) -> np.ndarray:
+    """Tile position high+low → (2*grid_h, 3*grid_w) grayscale.
+
+    Layout:
+      Row 0: [posHi_X | posHi_Y | posHi_Z]
+      Row 1: [posLo_X | posLo_Y | posLo_Z]
+    """
+    row_hi = _tile_horizontal([pos_high[:, i] for i in range(3)], grid_h, grid_w)
+    row_lo = _tile_horizontal([pos_low[:, i] for i in range(3)], grid_h, grid_w)
+    return np.concatenate([row_hi, row_lo], axis=0)
+
+
+def tile_stream_motion(rot: np.ndarray, so: np.ndarray,
+                       grid_h: int, grid_w: int) -> np.ndarray:
+    """Tile rotation XYZW + scaleOpacity XY → (2*grid_h, 3*grid_w) grayscale.
+
+    Layout:
+      Row 0: [rot_X | rot_Y | rot_Z]
+      Row 1: [rot_W | so_X  | so_Y ]
+    """
+    row0 = _tile_horizontal([rot[:, 0], rot[:, 1], rot[:, 2]], grid_h, grid_w)
+    row1 = _tile_horizontal([rot[:, 3], so[:, 0], so[:, 1]], grid_h, grid_w)
+    return np.concatenate([row0, row1], axis=0)
+
+
+def tile_stream_appearance(so_zw: np.ndarray, sh_dc: np.ndarray,
+                           grid_h: int, grid_w: int) -> np.ndarray:
+    """Tile scaleOpacity ZW + shDC RGB → (grid_h, 5*grid_w) grayscale.
+
+    Layout:
+      Row 0: [so_Z | so_W | shDC_R | shDC_G | shDC_B]
+    """
+    return _tile_horizontal(
+        [so_zw[:, 0], so_zw[:, 1], sh_dc[:, 0], sh_dc[:, 1], sh_dc[:, 2]],
+        grid_h, grid_w,
+    )
+
+
+# --- ffmpeg H.265 Encoding ---
+
+def start_encoder(width: int, height: int, fps: int, crf: int,
+                  output_path: str) -> subprocess.Popen:
+    """Start ffmpeg H.265 encoder reading raw grayscale frames from stdin.
+
+    Input: grayscale (pix_fmt gray) raw frames via stdin.
+    Output: YUV420p H.265 Main Profile. ffmpeg converts gray→yuv420p by
+    placing gray data in Y plane and filling U/V with 128 (neutral chroma).
+    """
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-s", f"{width}x{height}",
+        "-framerate", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx265",
+        "-pix_fmt", "yuv420p",
+        "-crf", str(crf),
+        "-x265-params", f"keyint={fps}:min-keyint={fps}:log-level=error",
+        output_path,
+    ]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def write_frame(proc: subprocess.Popen, frame: np.ndarray):
+    """Write one grayscale frame (H, W) uint8 to the encoder."""
+    proc.stdin.write(frame.tobytes())
+
+
+def finish_encoder(proc: subprocess.Popen):
+    """Close stdin and wait for ffmpeg to finish. Returns stderr output."""
+    proc.stdin.close()
+    _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited with code {proc.returncode}: {stderr.decode()}")
+    return stderr.decode()
+
+
+# --- Manifest Generation ---
+
+def write_manifest(output_dir: str, sequence_name: str, frame_count: int,
+                   fps: int, grid_w: int, grid_h: int,
+                   gaussian_count: int, bounds: dict):
+    """Write manifest.json with quantization bounds and stream metadata."""
+    def _to_list(arr):
+        return [round(float(x), 6) for x in arr]
+
+    manifest = {
+        "version": 1,
+        "format": "4dgs-h265",
+        "sequenceName": sequence_name,
+        "frameCount": frame_count,
+        "targetFPS": fps,
+        "duration": round(frame_count / fps, 2),
+        "shDegree": 0,
+        "gridWidth": grid_w,
+        "gridHeight": grid_h,
+        "gaussianCount": gaussian_count,
+        "requiredCodec": "hev1.1.6.L150.B0",
+        "coordinateSpace": "colmap",
+        "quaternionOrder": "wxyz",
+        "quantization": {
+            "position": {
+                "precision": "uint16",
+                "min": _to_list(bounds["position"]["min"]),
+                "max": _to_list(bounds["position"]["max"]),
+            },
+            "rotation": {
+                "precision": "uint8",
+                "min": _to_list(bounds["rotation"]["min"]),
+                "max": _to_list(bounds["rotation"]["max"]),
+            },
+            "scaleOpacity": {
+                "precision": "uint8",
+                "min": _to_list(bounds["scale_opacity"]["min"]),
+                "max": _to_list(bounds["scale_opacity"]["max"]),
+            },
+            "shDC": {
+                "precision": "uint8",
+                "min": _to_list(bounds["sh_dc"]["min"]),
+                "max": _to_list(bounds["sh_dc"]["max"]),
+            },
+        },
+        "streams": {
+            "position": {
+                "file": "stream_position.mp4",
+                "width": grid_w * 3,
+                "height": grid_h * 2,
+                "channels": 6,
+            },
+            "motion": {
+                "file": "stream_motion.mp4",
+                "width": grid_w * 3,
+                "height": grid_h * 2,
+                "channels": 6,
+            },
+            "appearance": {
+                "file": "stream_appearance.mp4",
+                "width": grid_w * 5,
+                "height": grid_h,
+                "channels": 5,
+            },
+        },
+    }
+
+    out_path = Path(output_dir) / "manifest.json"
+    with open(out_path, "w") as f:
+        json.dump(manifest, f, indent=2)

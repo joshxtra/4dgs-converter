@@ -1,8 +1,15 @@
 import numpy as np
 import sys
 import os
+import tempfile
+import subprocess
+import json
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.pipeline.ply_to_h265 import quantize_position, quantize_uint8, dequantize_position, dequantize_uint8
+from app.pipeline.ply_to_h265 import tile_stream_position, tile_stream_motion, tile_stream_appearance
+from app.pipeline.ply_to_h265 import start_encoder, write_frame, finish_encoder
+from app.pipeline.ply_to_h265 import write_manifest
 
 def test_quantize_position_roundtrip():
     """uint16 quantization should have max error < 1/65535 of range."""
@@ -45,6 +52,114 @@ def test_quantize_position_clipping():
     assert high[0, 1] == 0 and low[0, 1] == 0      # clipped to min
 
 
+def test_tile_stream_position_shape():
+    grid_h, grid_w = 16, 16
+    n = grid_h * grid_w
+    pos_high = np.arange(n * 3, dtype=np.uint8).reshape(n, 3)
+    pos_low = np.arange(n * 3, dtype=np.uint8).reshape(n, 3)
+    result = tile_stream_position(pos_high, pos_low, grid_h, grid_w)
+    assert result.shape == (grid_h * 2, grid_w * 3)
+    assert result.dtype == np.uint8
+
+def test_tile_stream_position_layout():
+    grid_h, grid_w = 4, 4
+    n = 16
+    pos_high = np.zeros((n, 3), dtype=np.uint8)
+    pos_high[0, 0] = 10
+    pos_high[0, 1] = 20
+    pos_high[0, 2] = 30
+    pos_low = np.zeros((n, 3), dtype=np.uint8)
+    pos_low[0, 0] = 11
+    result = tile_stream_position(pos_high, pos_low, grid_h, grid_w)
+    assert result[0, 0] == 10
+    assert result[0, grid_w] == 20
+    assert result[0, grid_w*2] == 30
+    assert result[grid_h, 0] == 11
+
+def test_tile_stream_motion_shape():
+    grid_h, grid_w = 16, 16
+    n = grid_h * grid_w
+    rot = np.zeros((n, 4), dtype=np.uint8)
+    so = np.zeros((n, 4), dtype=np.uint8)
+    result = tile_stream_motion(rot, so, grid_h, grid_w)
+    assert result.shape == (grid_h * 2, grid_w * 3)
+
+def test_tile_stream_appearance_shape():
+    grid_h, grid_w = 16, 16
+    n = grid_h * grid_w
+    so_zw = np.zeros((n, 2), dtype=np.uint8)
+    sh_dc = np.zeros((n, 3), dtype=np.uint8)
+    result = tile_stream_appearance(so_zw, sh_dc, grid_h, grid_w)
+    assert result.shape == (grid_h, grid_w * 5)
+
+def test_ffmpeg_encode_produces_valid_mp4():
+    """Encode 5 synthetic grayscale frames and verify output is valid MP4."""
+    width, height, fps = 48, 32, 24
+    frames = [np.random.randint(0, 256, (height, width), dtype=np.uint8) for _ in range(5)]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.mp4")
+        proc = start_encoder(width, height, fps, crf=23, output_path=out_path)
+        for f in frames:
+            write_frame(proc, f)
+        finish_encoder(proc)
+
+        assert Path(out_path).exists()
+        assert Path(out_path).stat().st_size > 0
+
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=width,height,codec_name",
+             "-of", "json", out_path],
+            capture_output=True, text=True
+        )
+        info = json.loads(result.stdout)
+        stream = info["streams"][0]
+        assert stream["codec_name"] == "hevc"
+        assert int(stream["width"]) == width
+        assert int(stream["height"]) == height
+
+def test_manifest_structure():
+    bounds = {
+        "position": {"min": np.array([-1, -1, -1], dtype=np.float32),
+                      "max": np.array([1, 1, 1], dtype=np.float32)},
+        "rotation": {"min": np.array([-1, -1, -1, -1], dtype=np.float32),
+                      "max": np.array([1, 1, 1, 1], dtype=np.float32)},
+        "scale_opacity": {"min": np.array([0, 0, 0, 0], dtype=np.float32),
+                           "max": np.array([1, 1, 1, 1], dtype=np.float32)},
+        "sh_dc": {"min": np.array([-1, -1, -1], dtype=np.float32),
+                   "max": np.array([1, 1, 1], dtype=np.float32)},
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        write_manifest(
+            output_dir=tmp,
+            sequence_name="test-seq",
+            frame_count=10,
+            fps=24,
+            grid_w=1088, grid_h=1088,
+            gaussian_count=1179648,
+            bounds=bounds,
+        )
+
+        manifest_path = Path(tmp) / "manifest.json"
+        assert manifest_path.exists()
+
+        with open(manifest_path) as f:
+            m = json.load(f)
+
+        assert m["format"] == "4dgs-h265"
+        assert m["frameCount"] == 10
+        assert m["targetFPS"] == 24
+        assert m["shDegree"] == 0
+        assert m["coordinateSpace"] == "colmap"
+        assert m["quaternionOrder"] == "wxyz"
+        assert "position" in m["quantization"]
+        assert len(m["streams"]) == 3
+        assert "position" in m["streams"]
+        assert "motion" in m["streams"]
+        assert "appearance" in m["streams"]
+
+
 if __name__ == "__main__":
     test_quantize_position_roundtrip()
     print("PASS: test_quantize_position_roundtrip")
@@ -52,4 +167,16 @@ if __name__ == "__main__":
     print("PASS: test_quantize_uint8_roundtrip")
     test_quantize_position_clipping()
     print("PASS: test_quantize_position_clipping")
+    test_tile_stream_position_shape()
+    print("PASS: test_tile_stream_position_shape")
+    test_tile_stream_position_layout()
+    print("PASS: test_tile_stream_position_layout")
+    test_tile_stream_motion_shape()
+    print("PASS: test_tile_stream_motion_shape")
+    test_tile_stream_appearance_shape()
+    print("PASS: test_tile_stream_appearance_shape")
+    test_ffmpeg_encode_produces_valid_mp4()
+    print("PASS: test_ffmpeg_encode_produces_valid_mp4")
+    test_manifest_structure()
+    print("PASS: test_manifest_structure")
     print("\nAll tests passed!")
