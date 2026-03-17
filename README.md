@@ -135,4 +135,6 @@ app/
     raw_to_gsd.py
 ```
 
-## Built by [Dazai Studio](https://github.com/DazaiStudio)
+## License
+
+MIT
