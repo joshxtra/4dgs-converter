@@ -589,10 +589,21 @@ class MainWindow(QMainWindow):
 
     def _on_finished_ok(self, output_path: str):
         self._set_running(False)
-        self.step_label.setText("Done!")
         self.progress_bar.setValue(100)
         self.eta_label.setText("")
-        QMessageBox.information(self, "Complete", f"Output: {output_path}")
+        if os.path.exists(output_path):
+            size_mb = os.path.getsize(output_path) / 1e6
+            self.step_label.setText(f"Done! ({size_mb:.1f} MB)")
+            QMessageBox.information(
+                self, "Complete",
+                f"Output: {output_path}\nSize: {size_mb:.1f} MB",
+            )
+        else:
+            self.step_label.setText("Done (file not found?)")
+            QMessageBox.warning(
+                self, "Warning",
+                f"Pipeline finished but output not found:\n{output_path}",
+            )
 
     def _on_finished_error(self, error: str):
         self._set_running(False)

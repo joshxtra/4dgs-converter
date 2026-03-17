@@ -9,6 +9,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('app/converter/icon.png', 'app/converter'),
+        ('app/converter/icon.ico', 'app/converter'),
     ],
     hiddenimports=[
         'app.converter',
@@ -46,7 +47,7 @@ if sys.platform == 'darwin':
         strip=False,
         upx=True,
         console=False,
-        icon='app/converter/icon.png',
+        icon='app/converter/icon.ico',
     )
     coll = COLLECT(
         exe,
@@ -59,7 +60,7 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='4DGS-Converter.app',
-        icon='app/converter/icon.png',
+        icon='app/converter/icon.ico',
         bundle_identifier='com.dazaistudio.4dgs-converter',
     )
 else:
@@ -74,5 +75,5 @@ else:
         strip=False,
         upx=True,
         console=False,
-        icon='app/converter/icon.png',
+        icon='app/converter/icon.ico',
     )
