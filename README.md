@@ -10,7 +10,7 @@
   </p>
 </p>
 
-![4DGS Converter GUI](screenshot-v2.png)
+![4DGS Converter GUI](docs/screenshot.png)
 
 ## Download
 
