@@ -18,14 +18,17 @@ def main_gui():
 
     app = QApplication(sys.argv)
 
-    # Set app-level icon (taskbar + window)
-    # PyInstaller extracts data files to sys._MEIPASS
+    # Set app-level icon (taskbar + window) — prefer .ico for multi-res
     base_dir = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
-    icon_path = os.path.join(base_dir, "app", "converter", "icon.png")
-    if not os.path.exists(icon_path):
-        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    for icon_name in ["icon.ico", "icon.png"]:
+        for search_dir in [os.path.join(base_dir, "app", "converter"), os.path.dirname(__file__)]:
+            icon_path = os.path.join(search_dir, icon_name)
+            if os.path.exists(icon_path):
+                app.setWindowIcon(QIcon(icon_path))
+                break
+        else:
+            continue
+        break
 
     window = MainWindow()
     window.show()
@@ -98,20 +101,27 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
     total_frames = get_video_frame_count(input_path)
     os.makedirs(images_folder, exist_ok=True)
 
+    # Calculate expected frame count
+    ef = end_frame if end_frame is not None and end_frame >= 0 else total_frames - 1
+    expected = ef - start_frame + 1
+
     existing = [f for f in os.listdir(images_folder) if f.endswith(".jpg")]
-    if len(existing) >= total_frames:
+    if len(existing) >= expected:
         print(f"  Frames already extracted ({len(existing)} files), skipping.")
     else:
         extract_frames(
             video_path=input_path,
             output_folder=images_folder,
             frame_count=total_frames,
+            fps=fps,
+            start_frame=start_frame,
+            end_frame=end_frame if end_frame is not None else -1,
             progress_callback=lambda msg: print(f"  {msg}"),
         )
 
     # Step 2: Generate PLY
     print("Step 2/3: Generating PLY (SHARP)...")
-    from app.pipeline.images_to_ply import run_sharp_predict
+    from app.pipeline.images_to_ply import generate_ply
 
     os.makedirs(ply_folder, exist_ok=True)
     ply_count = len([f for f in os.listdir(ply_folder) if f.endswith(".ply")])
@@ -120,7 +130,7 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
     if ply_count >= image_count and ply_count > 0:
         print(f"  PLY files already exist ({ply_count} files), skipping.")
     else:
-        run_sharp_predict(images_folder, ply_folder)
+        generate_ply(images_folder, ply_folder, progress_callback=lambda msg: print(f"  {msg}"))
 
     # Step 3: Convert to GSD
     if not args.skip_gsd:
