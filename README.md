@@ -8,11 +8,18 @@ Convert videos or 3DGS (.ply) sequences into 4DGS (.gsd) files for real-time Gau
 
 ![4DGS Converter GUI](screenshot-v2.png)
 
+## Download
+
+| Platform | File |
+|----------|------|
+| Windows  | [**4DGS-Converter.exe**](https://github.com/DazaiStudio/4dgs-converter/releases/latest) |
+| macOS    | Run from source (see below) |
+
 ## What is 4DGS?
 
 **4D Gaussian Splatting** extends 3D Gaussian Splatting with a time dimension, enabling real-time playback of dynamic 3D scenes. The `.gsd` (Gaussian Stream Data) format stores compressed frame sequences with:
 
-- **Byte-Shuffle + LZ4** compression (~60-70% of raw size)
+- **Byte-Shuffle + LZ4** compression (~30-70% of raw size)
 - **Frame-independent random access** (O(1) seek to any frame)
 - **Compatible with any 3DGS model** (SHARP, PostShot, Nerfstudio, etc.)
 
@@ -21,12 +28,10 @@ Convert videos or 3DGS (.ply) sequences into 4DGS (.gsd) files for real-time Gau
 ```
 Video ──► Images (ffmpeg) ──► 3DGS .ply (SHARP) ──► 4DGS .gsd
                                                       ▲
-                        PLY Folder ───────────────────┘
+              3DGS Sequence (.ply) folder ────────────┘
 ```
 
 ## Installation
-
-### From Source (recommended)
 
 ```bash
 git clone https://github.com/DazaiStudio/4dgs-converter.git
@@ -34,15 +39,6 @@ cd 4dgs-converter
 pip install -r requirements.txt
 pip install PySide6 lz4
 ```
-
-### Pre-built Executable
-
-Download from [Releases](https://github.com/DazaiStudio/4dgs-converter/releases):
-
-| Platform | File |
-|----------|------|
-| Windows  | `4DGS-Converter.exe` |
-| macOS    | `4DGS-Converter.app` (or run from source) |
 
 ## Dependencies
 
@@ -63,7 +59,7 @@ python -m app.converter
 ```
 
 1. Select mode: **Video to 4DGS** or **3DGS Sequence to 4DGS**
-2. Browse for input (video file or PLY folder)
+2. Browse for input (video file or 3DGS sequence (.ply) folder)
 3. Adjust FPS and frame range if needed
 4. Click **Generate**
 
@@ -73,7 +69,7 @@ python -m app.converter
 # Video to GSD (full pipeline)
 python -m app.converter --cli -i video.mp4 -o output.gsd
 
-# PLY folder to GSD
+# 3DGS sequence (.ply) folder to GSD
 python -m app.converter --cli -i /path/to/ply_folder -o output.gsd --fps 24
 
 # With options
@@ -83,7 +79,7 @@ python -m app.converter --cli -i video.mp4 --start 0 --end 100 --keep-ply --keep
 | Flag | Description |
 |------|-------------|
 | `--cli` | Run in CLI mode (no GUI) |
-| `-i, --input` | Input video file or PLY folder |
+| `-i, --input` | Input video file or 3DGS sequence (.ply) folder |
 | `-o, --output` | Output .gsd path (auto-derived if omitted) |
 | `--mode` | `auto`, `video`, or `ply` (default: auto-detect) |
 | `--fps` | Target FPS (default: 30, auto-detected for video) |
@@ -92,10 +88,6 @@ python -m app.converter --cli -i video.mp4 --start 0 --end 100 --keep-ply --keep
 | `--keep-images` | Keep extracted images (video mode) |
 | `--keep-ply` | Keep PLY files (video mode) |
 | `--skip-gsd` | Stop after PLY generation (video mode) |
-
-### Executable
-
-Download `4DGS-Converter.exe` and double-click to launch the GUI.
 
 ## GSD Format
 
