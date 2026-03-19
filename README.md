@@ -19,6 +19,14 @@
 | Windows  | [**4DGS-Converter.exe**](https://github.com/DazaiStudio/4dgs-converter/releases/latest) |
 | macOS    | Run from source (see below) |
 
+## Features
+
+- **GUI** — One-click conversion with visual controls for FPS, frame range, and mode selection
+- **CLI** — Command-line interface for scripting and AI agent integration (Claude, GPT, etc.)
+- **LZ4 Compression** — Byte-shuffle + LZ4 for compact `.gsd` files (~30-70% of raw size)
+- **Random Access** — O(1) seek to any frame in the sequence
+- **Format Support** — Works with any standard 3DGS `.ply` format (SHARP, PostShot, Nerfstudio, etc.)
+
 ## What is 4DGS?
 
 **4D Gaussian Splatting** extends 3D Gaussian Splatting with a time dimension, enabling real-time playback of dynamic 3D scenes. The `.gsd` (Gaussian Stream Data) format stores compressed frame sequences with:
