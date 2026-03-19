@@ -30,8 +30,6 @@
 
 - **GUI** — One-click conversion with visual controls for FPS, frame range, and mode selection
 - **CLI** — Command-line interface for scripting and AI agent integration (Claude, GPT, etc.)
-- **LZ4 Compression** — Byte-shuffle + LZ4 for compact `.gsd` files (~30-70% of raw size)
-- **Random Access** — O(1) seek to any frame in the sequence
 - **Format Support** — Works with any standard 3DGS `.ply` format (SHARP, PostShot, Nerfstudio, etc.)
 
 ---
