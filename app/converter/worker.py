@@ -31,8 +31,8 @@ class PipelineWorker(QThread):
 
     def __init__(
         self,
-        mode: str,              # "video" or "ply"
-        input_path: str,        # video file or PLY folder
+        mode: str,              # "video", "images", or "ply"
+        input_path: str,        # video file, image folder, or PLY folder
         output_path: str,       # .gsd output path
         fps: float,
         start_frame: int = 0,
@@ -85,6 +85,9 @@ class PipelineWorker(QThread):
             parent = os.path.dirname(self.output_path)
             self.images_folder = os.path.join(parent, "images")
             self.ply_folder = os.path.join(parent, "ply")
+        elif self.mode == "images":
+            self.images_folder = self.input_path
+            self.ply_folder = os.path.join(os.path.dirname(self.output_path), "ply")
         else:
             self.ply_folder = self.input_path
             self.images_folder = None
@@ -95,6 +98,8 @@ class PipelineWorker(QThread):
 
             if self.mode == "video":
                 self._run_video_pipeline()
+            elif self.mode == "images":
+                self._run_images_pipeline()
             else:
                 self._run_ply_pipeline()
 
@@ -131,6 +136,25 @@ class PipelineWorker(QThread):
         self._check_stop()
 
         # Step 3: Convert to GSD
+        if not self.skip_gsd:
+            step += 1
+            self.progress.emit(step, total_steps, "Converting to GSD...")
+            self._convert_to_gsd()
+
+        # Cleanup
+        self._cleanup()
+
+    def _run_images_pipeline(self):
+        total_steps = 1 if self.skip_gsd else 2
+        step = 0
+
+        # Step 1: Generate PLY
+        step += 1
+        self.progress.emit(step, total_steps, "Generating PLY (SHARP)...")
+        self._generate_ply()
+        self._check_stop()
+
+        # Step 2: Convert to GSD
         if not self.skip_gsd:
             step += 1
             self.progress.emit(step, total_steps, "Converting to GSD...")
@@ -192,8 +216,13 @@ class PipelineWorker(QThread):
 
         self._log(f"Running SHARP predict on {image_count} images...")
 
+        from app.converter.env_check import find_sharp
+        sharp_exe = find_sharp()
+        if not sharp_exe:
+            raise RuntimeError("sharp CLI not found. Click Install in the environment bar.")
+
         cmd = [
-            "sharp", "predict",
+            sharp_exe, "predict",
             "-i", self.images_folder,
             "-o", self.ply_folder,
             "--no-render",
@@ -258,6 +287,8 @@ class PipelineWorker(QThread):
             if not self.keep_images and self.images_folder and os.path.isdir(self.images_folder):
                 self._log(f"Cleaning up images: {self.images_folder}")
                 shutil.rmtree(self.images_folder, ignore_errors=True)
+        # images mode: never delete images_folder (user's input)
+        if self.mode in ("video", "images"):
             if not self.keep_ply and self.ply_folder and os.path.isdir(self.ply_folder):
                 self._log(f"Cleaning up PLY: {self.ply_folder}")
                 shutil.rmtree(self.ply_folder, ignore_errors=True)

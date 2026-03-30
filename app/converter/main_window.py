@@ -1,6 +1,7 @@
 """PySide6 main window for 4DGS Converter."""
 
 import os
+import sys
 import time
 
 from PySide6.QtCore import Qt
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self._eta_start_time = 0.0
         self._total_frames = 0
         self._current_mode = 0
+        self._input_source = "video"
 
         self._env = check_all()
         self._build_ui()
@@ -88,6 +90,38 @@ class MainWindow(QMainWindow):
         self._tab_style_active = tab_style_active
         self._tab_style_inactive = tab_style_inactive
         layout.addLayout(mode_row)
+
+        # -- Input Source selector (Video tab only)
+        self.source_row = QHBoxLayout()
+        self.source_row.addWidget(QLabel("Input Source:"))
+        self._source_video = QPushButton("Video File")
+        self._source_video.setCheckable(True)
+        self._source_video.setChecked(True)
+        self._source_images = QPushButton("Image Sequence")
+        self._source_images.setCheckable(True)
+        self._source_images.setChecked(False)
+
+        source_style_active = (
+            "QPushButton { background: #3a3a3a; border: 1px solid #555; "
+            "padding: 4px 12px; font-weight: bold; border-radius: 3px; }"
+        )
+        source_style_inactive = (
+            "QPushButton { background: #2a2a2a; border: 1px solid #444; "
+            "padding: 4px 12px; color: #888; border-radius: 3px; }"
+            "QPushButton:hover { background: #333; color: #ccc; }"
+        )
+        self._source_style_active = source_style_active
+        self._source_style_inactive = source_style_inactive
+        self._source_video.setStyleSheet(source_style_active)
+        self._source_images.setStyleSheet(source_style_inactive)
+
+        self._source_video.clicked.connect(lambda: self._set_input_source("video"))
+        self._source_images.clicked.connect(lambda: self._set_input_source("images"))
+
+        self.source_row.addWidget(self._source_video)
+        self.source_row.addWidget(self._source_images)
+        self.source_row.addStretch()
+        layout.addLayout(self.source_row)
 
         # -- Input
         input_row = QHBoxLayout()
@@ -240,6 +274,12 @@ class MainWindow(QMainWindow):
             icon = "\u2713" if available else "\u2717"
             color = "green" if available else "red"
             lbl = QLabel(f'<span style="color:{color}">{icon}</span> {name}')
+            if not available and name == "sharp":
+                lbl.setToolTip(
+                    "sharp not found in current Python environment.\n"
+                    "Click Install to install here, or activate\n"
+                    "the environment where sharp is installed."
+                )
             env_row.addWidget(lbl)
             if not available:
                 install_btn = QPushButton("Install")
@@ -260,22 +300,27 @@ class MainWindow(QMainWindow):
 
         self.about_text = QLabel(
             "<b>How to Use</b><br>"
-            "1. Select mode: <i>Video to 4DGS</i> or <i>3DGS Sequence to 4DGS</i><br>"
-            "2. Browse for input (video file or PLY folder)<br>"
+            "1. Select mode: <i>Video to 4DGS</i>, <i>Image Sequence to 4DGS</i>, "
+            "or <i>3DGS Sequence to 4DGS</i><br>"
+            "2. Browse for input<br>"
             "3. Adjust Target FPS and frame range if needed<br>"
             "4. Click <b>Generate</b><br><br>"
+            "<b>Supported Formats</b><br>"
+            "Video: .mp4, .mov, .avi, .mkv<br>"
+            "Image Sequence: .jpg, .jpeg, .png, .heic<br>"
+            "3DGS Sequence: .ply (any 3DGS model)<br><br>"
             "<b>FPS &amp; Frame Step</b><br>"
             "In <i>3DGS Sequence</i> mode, set <b>Source FPS</b> to your original video framerate, "
             "then set <b>Target FPS</b> to your desired output. "
             "If Target &lt; Source, frames are automatically skipped to match.<br>"
             "Example: Source 60 fps, Target 30 fps \u2192 every 2nd frame is used (half the data).<br><br>"
             "<b>Pipeline</b><br>"
-            "Video \u2192 Images (ffmpeg) \u2192 3DGS (.ply) (SHARP) \u2192 4DGS (.gsd)<br><br>"
+            "Video / Image Sequence \u2192 3DGS .ply (SHARP) \u2192 4DGS .gsd<br>"
+            "3DGS Sequence (.ply) \u2192 4DGS .gsd<br><br>"
             "<b>4DGS (.gsd)</b> \u2014 Gaussian Stream Data. Compressed format for real-time "
-            "4D Gaussian Splatting playback. Byte-Shuffle + LZ4, frame-independent random access.<br>"
-            "Typical compression: ~30-70% of raw size.<br><br>"
-            "<b>3DGS to 4DGS</b> \u2014 Any 3DGS (.ply) sequence can be packed into "
-            "4DGS (.gsd), regardless of model (SHARP, PostShot, Nerfstudio, etc.).<br><br>"
+            "4D Gaussian Splatting playback. Frame-independent O(1) random access.<br>"
+            "v1: Byte-Shuffle + LZ4 (~64% of raw)<br>"
+            "v2: SHARP-VQ + LZ4 (~22% of raw, 73% smaller than v1)<br><br>"
             "<b>CLI</b><br>"
             "<code>python -m app.converter --cli -i input -o output.gsd</code><br><br>"
             "<b>Built by <a href='https://github.com/DazaiStudio'>Dazai Studio</a></b> | "
@@ -306,13 +351,44 @@ class MainWindow(QMainWindow):
             )
         self._on_mode_changed()
 
+    def _set_input_source(self, source: str):
+        """Switch input source within Video to 4DGS tab."""
+        self._input_source = source
+        is_video_src = source == "video"
+        self._source_video.setChecked(is_video_src)
+        self._source_images.setChecked(not is_video_src)
+        self._source_video.setStyleSheet(
+            self._source_style_active if is_video_src else self._source_style_inactive
+        )
+        self._source_images.setStyleSheet(
+            self._source_style_inactive if is_video_src else self._source_style_active
+        )
+        # Clear input when switching
+        self.input_edit.clear()
+        self.output_edit.clear()
+        self.info_label.setText("")
+        self._on_mode_changed()
+
     def _on_mode_changed(self):
         is_video = getattr(self, '_current_mode', 0) == 0
-        video_available = self._env.get("ffmpeg", False) and self._env.get("sharp", False)
+        input_source = getattr(self, '_input_source', 'video')
+        is_video_source = is_video and input_source == "video"
+        is_images_source = is_video and input_source == "images"
 
-        self.input_edit.setPlaceholderText(
-            "Select a video file..." if is_video else "Select PLY folder..."
-        )
+        # Show/hide input source selector (only in Video tab)
+        for i in range(self.source_row.count()):
+            w = self.source_row.itemAt(i).widget()
+            if w:
+                w.setVisible(is_video)
+
+        # Input placeholder
+        if is_video_source:
+            self.input_edit.setPlaceholderText("Select a video file...")
+        elif is_images_source:
+            self.input_edit.setPlaceholderText("Select image sequence folder...")
+        else:
+            self.input_edit.setPlaceholderText("Select PLY folder...")
+
         self.info_label.setText("")
 
         # Source FPS: only visible in PLY mode
@@ -320,26 +396,35 @@ class MainWindow(QMainWindow):
         self.source_fps_spin.setVisible(not is_video)
         self.source_fps_note.setVisible(not is_video)
 
-        # FPS: read-only in video mode, editable in both
-        self.fps_spin.setReadOnly(is_video)
-        if is_video:
+        # FPS: read-only only for video file source, editable otherwise
+        self.fps_spin.setReadOnly(is_video_source)
+        if is_video_source:
             self.fps_note.setText("(auto-detected)")
+        elif is_images_source:
+            self.fps_note.setText("(set manually)")
         else:
             self._update_fps_note()
         self.fps_note.setVisible(True)
 
-        # Checkboxes: only visible in video mode
-        self.chk_keep_images.setVisible(is_video)
+        # Checkboxes: Keep images only for video file source
+        self.chk_keep_images.setVisible(is_video_source)
         self.chk_keep_ply.setVisible(is_video)
         self.chk_skip_gsd.setVisible(is_video)
 
-        # Disable video mode if deps missing
-        if is_video and not video_available:
-            self.generate_btn.setEnabled(False)
-            self.generate_btn.setToolTip("Requires ffmpeg and sharp")
+        # Dependency gating
+        has_ffmpeg = self._env.get("ffmpeg", False)
+        has_sharp = self._env.get("sharp", False)
+        if is_video_source:
+            can_generate = has_ffmpeg and has_sharp
+            tooltip = "Requires ffmpeg and sharp" if not can_generate else ""
+        elif is_images_source:
+            can_generate = has_sharp
+            tooltip = "Requires sharp" if not can_generate else ""
         else:
-            self.generate_btn.setEnabled(True)
-            self.generate_btn.setToolTip("")
+            can_generate = True
+            tooltip = ""
+        self.generate_btn.setEnabled(can_generate)
+        self.generate_btn.setToolTip(tooltip)
 
     def _update_fps_note(self):
         """Update the FPS note to show frame step info in PLY mode."""
@@ -411,13 +496,15 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------- File browse
     def _browse_input(self):
         is_video = getattr(self, '_current_mode', 0) == 0
-        if is_video:
+        input_source = getattr(self, '_input_source', 'video')
+
+        if is_video and input_source == "video":
             path, _ = QFileDialog.getOpenFileName(
                 self, "Select Video",
                 "", "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)",
             )
         else:
-            path = QFileDialog.getExistingDirectory(self, "Select PLY Folder")
+            path = QFileDialog.getExistingDirectory(self, "Select Folder")
 
         if not path:
             return
@@ -426,8 +513,8 @@ class MainWindow(QMainWindow):
         self._auto_derive_output(path)
         self._update_info(path)
 
-        # Auto-detect FPS for video
-        if is_video:
+        # Auto-detect FPS for video file source only
+        if is_video and input_source == "video":
             from app.pipeline.video_to_images import get_video_fps
 
             fps = get_video_fps(path)
@@ -448,11 +535,18 @@ class MainWindow(QMainWindow):
 
     def _auto_derive_output(self, input_path: str):
         is_video = getattr(self, '_current_mode', 0) == 0
-        if is_video:
+        input_source = getattr(self, '_input_source', 'video')
+
+        if is_video and input_source == "video":
             name = os.path.splitext(os.path.basename(input_path))[0]
             parent = os.path.dirname(input_path)
             out_dir = os.path.join(parent, name)
             self.output_edit.setText(os.path.join(out_dir, f"{name}.gsd"))
+        elif is_video and input_source == "images":
+            folder_name = os.path.basename(input_path.rstrip("/\\"))
+            parent = os.path.dirname(input_path.rstrip("/\\"))
+            out_dir = os.path.join(parent, folder_name)
+            self.output_edit.setText(os.path.join(out_dir, f"{folder_name}.gsd"))
         else:
             folder_name = os.path.basename(input_path.rstrip("/\\"))
             parent = os.path.dirname(input_path.rstrip("/\\"))
@@ -461,7 +555,9 @@ class MainWindow(QMainWindow):
     def _update_info(self, input_path: str):
         """Show frame count and duration info after selecting input."""
         is_video = getattr(self, '_current_mode', 0) == 0
-        if is_video:
+        input_source = getattr(self, '_input_source', 'video')
+
+        if is_video and input_source == "video":
             from app.pipeline.video_to_images import get_video_frame_count, get_video_fps
 
             frames = get_video_frame_count(input_path)
@@ -475,6 +571,18 @@ class MainWindow(QMainWindow):
             elif frames > 0:
                 self.info_label.setText(f"{frames} frames")
             else:
+                self.info_label.setText("")
+        elif is_video and input_source == "images":
+            if os.path.isdir(input_path):
+                IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".heic")
+                img_count = len([
+                    f for f in os.listdir(input_path)
+                    if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+                ])
+                self._total_frames = img_count
+                self.info_label.setText(f"{img_count} images")
+            else:
+                self._total_frames = 0
                 self.info_label.setText("")
         else:
             if os.path.isdir(input_path):
@@ -501,8 +609,33 @@ class MainWindow(QMainWindow):
         self.range_note.setText(f"(of {self._total_frames})")
 
     # ------------------------------------------------- Install dependencies
+    def _run_install_bat(self, title: str, commands: list[str]):
+        """Run install commands in a new console via a temp .bat file.
+
+        Shows success/failure and reminds user to restart.
+        The console stays open (pause) so the user can see the result.
+        """
+        import subprocess
+        import tempfile
+        bat = os.path.join(tempfile.gettempdir(), "_4dgs_install.bat")
+        with open(bat, "w") as f:
+            f.write(f"@echo === {title} ===\n@echo.\n")
+            for cmd in commands:
+                f.write(f"@{cmd}\n")
+                f.write(f"@if errorlevel 1 (\n")
+                f.write(f"  @echo.\n  @echo [FAILED] {title}\n  @echo.\n  @pause\n  @exit /b 1\n)\n")
+            f.write(f"@echo.\n")
+            f.write(f"@echo [OK] {title} succeeded.\n")
+            f.write(f"@echo Please restart 4DGS Converter.\n")
+            f.write(f"@echo.\n@pause\n")
+        subprocess.Popen(
+            ["cmd", "/c", bat],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+
     def _install_dep(self, name: str):
         import subprocess
+        python = sys.executable
         if name == "lz4":
             reply = QMessageBox.question(
                 self, "Install lz4",
@@ -510,31 +643,52 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                subprocess.Popen(
-                    ["pip", "install", "lz4"],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
+                self._run_install_bat("Install lz4", [
+                    f'"{python}" -m pip install lz4',
+                ])
         elif name == "ffmpeg":
+            import webbrowser
             reply = QMessageBox.question(
                 self, "Install ffmpeg",
-                "Run: winget install ffmpeg?\n\n"
-                "Alternatively, download from https://ffmpeg.org and add to PATH.",
+                "ffmpeg is required for video frame extraction.\n\n"
+                "Open the ffmpeg download page?\n"
+                "After installing, add ffmpeg to your system PATH\n"
+                "and restart 4DGS Converter.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                subprocess.Popen(
-                    ["winget", "install", "ffmpeg"],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
+                webbrowser.open("https://ffmpeg.org/download.html")
         elif name == "sharp":
-            QMessageBox.information(
-                self, "Install SHARP (ml-sharp)",
-                "Install ml-sharp from source:\n\n"
-                "  git clone https://github.com/apple/ml-sharp\n"
-                "  cd ml-sharp\n"
-                "  pip install -e .\n\n"
-                "After installation, restart 4DGS Converter.",
+            # Determine install command based on whether ml-sharp source exists
+            app_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            ml_sharp_dir = os.path.join(app_dir, "ml-sharp")
+            has_source = (
+                os.path.isdir(ml_sharp_dir)
+                and os.path.isfile(os.path.join(ml_sharp_dir, "pyproject.toml"))
             )
+
+            if has_source:
+                detail = f"  pip install -e {ml_sharp_dir}"
+            else:
+                detail = (
+                    f"  git clone https://github.com/apple/ml-sharp\n"
+                    f"  pip install -e {ml_sharp_dir}"
+                )
+
+            reply = QMessageBox.question(
+                self, "Install SHARP (ml-sharp)",
+                f"Install ml-sharp?\n\n"
+                f"This will run:\n{detail}\n\n"
+                f"ml-sharp has large dependencies (PyTorch, etc.)\n"
+                f"and may take several minutes to install.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                commands = []
+                if not has_source:
+                    commands.append(f'git clone https://github.com/apple/ml-sharp "{ml_sharp_dir}"')
+                commands.append(f'"{python}" -m pip install -e "{ml_sharp_dir}"')
+                self._run_install_bat("Install SHARP (ml-sharp)", commands)
 
     # ------------------------------------------------- Frame range helpers
     def _get_start_frame(self) -> int:
@@ -585,6 +739,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.eta_label.setText("")
         self.log_text.clear()
+        self._set_input_source("video")
 
     # ------------------------------------------------------- Generate / Stop
     def _on_generate(self):
@@ -609,6 +764,13 @@ class MainWindow(QMainWindow):
                 return
 
         is_video = getattr(self, '_current_mode', 0) == 0
+        input_source = getattr(self, '_input_source', 'video')
+        if is_video and input_source == "video":
+            worker_mode = "video"
+        elif is_video and input_source == "images":
+            worker_mode = "images"
+        else:
+            worker_mode = "ply"
 
         self.log_text.clear()
         self.progress_bar.setValue(0)
@@ -617,7 +779,7 @@ class MainWindow(QMainWindow):
         self._eta_start_time = time.time()
 
         self.worker = PipelineWorker(
-            mode="video" if is_video else "ply",
+            mode=worker_mode,
             input_path=input_path,
             output_path=output_path,
             fps=float(self.fps_spin.value()),
@@ -650,6 +812,8 @@ class MainWindow(QMainWindow):
         self.clear_btn.setEnabled(not running)
         for btn in self._mode_buttons:
             btn.setEnabled(not running)
+        self._source_video.setEnabled(not running)
+        self._source_images.setEnabled(not running)
         self.input_btn.setEnabled(not running)
         self.output_btn.setEnabled(not running)
         self.fps_spin.setEnabled(not running)

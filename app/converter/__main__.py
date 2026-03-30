@@ -51,10 +51,31 @@ def main_gui():
     import os
 
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QIcon
+    from PySide6.QtGui import QIcon, QPalette, QColor
+    from PySide6.QtCore import Qt
     from app.converter.main_window import MainWindow
 
     app = QApplication(sys.argv)
+
+    # Force dark theme regardless of system setting
+    app.setStyle("Fusion")
+    dark = QPalette()
+    dark.setColor(QPalette.Window, QColor(43, 43, 43))
+    dark.setColor(QPalette.WindowText, QColor(208, 208, 208))
+    dark.setColor(QPalette.Base, QColor(30, 30, 30))
+    dark.setColor(QPalette.AlternateBase, QColor(43, 43, 43))
+    dark.setColor(QPalette.ToolTipBase, QColor(50, 50, 50))
+    dark.setColor(QPalette.ToolTipText, QColor(208, 208, 208))
+    dark.setColor(QPalette.Text, QColor(208, 208, 208))
+    dark.setColor(QPalette.Button, QColor(53, 53, 53))
+    dark.setColor(QPalette.ButtonText, QColor(208, 208, 208))
+    dark.setColor(QPalette.BrightText, QColor(255, 51, 51))
+    dark.setColor(QPalette.Link, QColor(86, 152, 195))
+    dark.setColor(QPalette.Highlight, QColor(86, 152, 195))
+    dark.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
+    dark.setColor(QPalette.Disabled, QPalette.Text, QColor(128, 128, 128))
+    dark.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(128, 128, 128))
+    app.setPalette(dark)
 
     window = MainWindow()
     window.show()
@@ -87,7 +108,19 @@ def main_cli(args):
     # Auto-detect mode
     if mode == "auto":
         if os.path.isdir(input_path):
-            mode = "ply"
+            # Check folder contents to distinguish ply vs images
+            contents = os.listdir(input_path)
+            has_ply = any(f.lower().endswith(".ply") for f in contents)
+            IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".heic")
+            has_images = any(
+                os.path.splitext(f)[1].lower() in IMAGE_EXTS for f in contents
+            )
+            if has_ply:
+                mode = "ply"
+            elif has_images:
+                mode = "images"
+            else:
+                mode = "ply"  # fallback
         else:
             mode = "video"
 
@@ -97,6 +130,10 @@ def main_cli(args):
             name = os.path.splitext(os.path.basename(input_path))[0]
             parent = os.path.dirname(input_path)
             output_path = os.path.join(parent, name, f"{name}.gsd")
+        elif mode == "images":
+            folder_name = os.path.basename(input_path.rstrip("/\\"))
+            parent = os.path.dirname(input_path.rstrip("/\\"))
+            output_path = os.path.join(parent, folder_name, f"{folder_name}.gsd")
         else:
             folder_name = os.path.basename(input_path.rstrip("/\\"))
             parent = os.path.dirname(input_path.rstrip("/\\"))
@@ -112,6 +149,8 @@ def main_cli(args):
 
     if mode == "video":
         _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args)
+    elif mode == "images":
+        _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args)
     else:
         _run_ply_cli(input_path, output_path, fps, start_frame, end_frame)
 
@@ -184,6 +223,46 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
     print("Done!")
 
 
+def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args):
+    import os
+
+    parent = os.path.dirname(output_path)
+    ply_folder = os.path.join(parent, "ply")
+
+    # Count images
+    IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".heic")
+    image_count = len([
+        f for f in os.listdir(input_path)
+        if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+    ])
+    print(f"  Found {image_count} images")
+
+    # Step 1: Generate PLY
+    print("Step 1/2: Generating PLY (SHARP)...")
+    from app.pipeline.images_to_ply import generate_ply
+
+    os.makedirs(ply_folder, exist_ok=True)
+    ply_count = len([f for f in os.listdir(ply_folder) if f.endswith(".ply")])
+
+    if ply_count >= image_count and ply_count > 0:
+        print(f"  PLY files already exist ({ply_count} files), skipping.")
+    else:
+        generate_ply(input_path, ply_folder, progress_callback=lambda msg: print(f"  {msg}"))
+
+    # Step 2: Convert to GSD
+    if not args.skip_gsd:
+        print("Step 2/2: Converting to GSD...")
+        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame)
+
+    # Cleanup PLY if not keeping
+    if not args.keep_ply and os.path.isdir(ply_folder):
+        import shutil
+        print(f"Cleaning up PLY: {ply_folder}")
+        shutil.rmtree(ply_folder, ignore_errors=True)
+
+    print("Done!")
+
+
 def _run_ply_cli(input_path, output_path, fps, start_frame, end_frame):
     print("Converting PLY to GSD...")
     _convert_gsd(input_path, output_path, fps, start_frame, end_frame)
@@ -225,14 +304,14 @@ def main():
         parser.add_argument("--cli", action="store_true", help="Run in CLI mode (no GUI)")
         parser.add_argument("-i", "--input", required=True, help="Input video file or PLY folder")
         parser.add_argument("-o", "--output", help="Output .gsd path (auto-derived if omitted)")
-        parser.add_argument("--mode", choices=["auto", "video", "ply"], default="auto",
+        parser.add_argument("--mode", choices=["auto", "video", "images", "ply"], default="auto",
                             help="Conversion mode (default: auto-detect from input)")
         parser.add_argument("--fps", type=float, default=30.0, help="Target FPS (default: 30)")
         parser.add_argument("--start", type=int, default=0, help="Start frame (0-based, default: 0)")
         parser.add_argument("--end", type=int, default=None, help="End frame (0-based, default: last)")
         parser.add_argument("--keep-images", action="store_true", help="Keep extracted images (video mode)")
-        parser.add_argument("--keep-ply", action="store_true", help="Keep PLY files (video mode)")
-        parser.add_argument("--skip-gsd", action="store_true", help="Skip GSD, stop after PLY (video mode)")
+        parser.add_argument("--keep-ply", action="store_true", help="Keep PLY files (video/images mode)")
+        parser.add_argument("--skip-gsd", action="store_true", help="Skip GSD, stop after PLY (video/images mode)")
 
         args = parser.parse_args()
         main_cli(args)
