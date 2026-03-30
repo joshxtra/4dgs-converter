@@ -25,7 +25,7 @@
 
 ## Features
 
-- **3 Input Modes** : Video, Image Sequence (.jpg/.png/.heic), or 3DGS Sequence (.ply)
+- **3 Input Modes** : Video (.mp4/.mov/.avi/.mkv), Image Sequence (.jpg/.png/.heic), or 3DGS Sequence (.ply)
 - **GSD v2 (SHARP-VQ)** : New compression format — ~78% smaller than v1 using per-frame vector quantization
 - **GUI** : Dark-themed interface with one-click SHARP install, dependency status, and visual controls
 - **CLI** : Command-line interface for scripting and AI agent integration (Claude, GPT, etc.)
@@ -71,7 +71,7 @@ Image Sequence ──────────────────► 3DGS .p
 3. Adjust FPS and frame range if needed
 4. Click **Generate**
 
-<img src="docs/screenshot.png" alt="4DGS Converter GUI" width="500">
+<img src="docs/screenshot.png" alt="4DGS Converter - Video Mode" width="400"> <img src="docs/screenshot_imgseq.png" alt="4DGS Converter - Image Sequence Mode" width="400">
 
 ### CLI
 
