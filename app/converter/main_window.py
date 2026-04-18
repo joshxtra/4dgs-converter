@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._current_mode = 0
         self._input_source = "video"
 
+        self._gsd_version = 1
         self._env = check_all()
         self._build_ui()
 
@@ -206,6 +207,39 @@ class MainWindow(QMainWindow):
         self.output_btn.clicked.connect(self._browse_output)
         out_row.addWidget(self.output_btn)
         layout.addLayout(out_row)
+
+        # -- GSD Version selector
+        gsd_ver_row = QHBoxLayout()
+        gsd_ver_row.addWidget(QLabel("GSD Version:"))
+        self._gsd_v1_btn = QPushButton("v1  (Shuffle+LZ4)")
+        self._gsd_v1_btn.setCheckable(True)
+        self._gsd_v1_btn.setChecked(True)
+        self._gsd_v2_btn = QPushButton("v2  (SHARP-VQ, ~78% smaller)")
+        self._gsd_v2_btn.setCheckable(True)
+        self._gsd_v2_btn.setChecked(False)
+        gsd_ver_style_active = (
+            "QPushButton { background: #3a3a3a; border: 1px solid #555; "
+            "padding: 4px 12px; font-weight: bold; border-radius: 3px; }"
+        )
+        gsd_ver_style_inactive = (
+            "QPushButton { background: #2a2a2a; border: 1px solid #444; "
+            "padding: 4px 12px; color: #888; border-radius: 3px; }"
+            "QPushButton:hover { background: #333; color: #ccc; }"
+        )
+        self._gsd_ver_style_active = gsd_ver_style_active
+        self._gsd_ver_style_inactive = gsd_ver_style_inactive
+        self._gsd_v1_btn.setStyleSheet(gsd_ver_style_active)
+        self._gsd_v2_btn.setStyleSheet(gsd_ver_style_inactive)
+        self._gsd_v1_btn.clicked.connect(lambda: self._set_gsd_version(1))
+        self._gsd_v2_btn.clicked.connect(lambda: self._set_gsd_version(2))
+        has_sklearn = self._env.get("sklearn", False)
+        if not has_sklearn:
+            self._gsd_v2_btn.setEnabled(False)
+            self._gsd_v2_btn.setToolTip("Requires scikit-learn: pip install scikit-learn")
+        gsd_ver_row.addWidget(self._gsd_v1_btn)
+        gsd_ver_row.addWidget(self._gsd_v2_btn)
+        gsd_ver_row.addStretch()
+        layout.addLayout(gsd_ver_row)
 
         # -- Checkboxes
         self.chk_keep_images = QCheckBox("Keep image sequence")
@@ -425,6 +459,17 @@ class MainWindow(QMainWindow):
             tooltip = ""
         self.generate_btn.setEnabled(can_generate)
         self.generate_btn.setToolTip(tooltip)
+
+    def _set_gsd_version(self, version: int):
+        self._gsd_version = version
+        self._gsd_v1_btn.setChecked(version == 1)
+        self._gsd_v2_btn.setChecked(version == 2)
+        self._gsd_v1_btn.setStyleSheet(
+            self._gsd_ver_style_active if version == 1 else self._gsd_ver_style_inactive
+        )
+        self._gsd_v2_btn.setStyleSheet(
+            self._gsd_ver_style_active if version == 2 else self._gsd_ver_style_inactive
+        )
 
     def _update_fps_note(self):
         """Update the FPS note to show frame step info in PLY mode."""
@@ -646,6 +691,16 @@ class MainWindow(QMainWindow):
                 self._run_install_bat("Install lz4", [
                     f'"{python}" -m pip install lz4',
                 ])
+        elif name == "sklearn":
+            reply = QMessageBox.question(
+                self, "Install scikit-learn",
+                "Run: pip install scikit-learn?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._run_install_bat("Install scikit-learn", [
+                    f'"{python}" -m pip install scikit-learn',
+                ])
         elif name == "ffmpeg":
             import webbrowser
             reply = QMessageBox.question(
@@ -789,6 +844,7 @@ class MainWindow(QMainWindow):
             keep_images=self.chk_keep_images.isChecked(),
             keep_ply=self.chk_keep_ply.isChecked(),
             skip_gsd=self.chk_skip_gsd.isChecked(),
+            gsd_version=self._gsd_version,
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.frame_progress.connect(self._on_frame_progress)
@@ -819,6 +875,9 @@ class MainWindow(QMainWindow):
         self.fps_spin.setEnabled(not running)
         self.start_spin.setEnabled(not running)
         self.end_spin.setEnabled(not running)
+        self._gsd_v1_btn.setEnabled(not running)
+        has_sklearn = self._env.get("sklearn", False)
+        self._gsd_v2_btn.setEnabled(not running and has_sklearn)
 
     # -------------------------------------------------------- Signal handlers
     def _on_progress(self, step: int, total: int, label: str):

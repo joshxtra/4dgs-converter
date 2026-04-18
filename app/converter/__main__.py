@@ -139,23 +139,26 @@ def main_cli(args):
             parent = os.path.dirname(input_path.rstrip("/\\"))
             output_path = os.path.join(parent, f"{folder_name}.gsd")
 
+    gsd_version = args.gsd_version
+
     print(f"Mode: {mode}")
     print(f"Input: {input_path}")
     print(f"Output: {output_path}")
     print(f"FPS: {fps}")
+    print(f"GSD version: v{gsd_version}")
     if start_frame > 0 or end_frame is not None:
         print(f"Frame range: {start_frame}-{end_frame if end_frame is not None else 'end'}")
     print()
 
     if mode == "video":
-        _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args)
+        _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version)
     elif mode == "images":
-        _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args)
+        _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version)
     else:
-        _run_ply_cli(input_path, output_path, fps, start_frame, end_frame)
+        _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, gsd_version)
 
 
-def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
+def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version=1):
     import os
 
     parent = os.path.dirname(output_path)
@@ -208,7 +211,7 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
     # Step 3: Convert to GSD
     if not args.skip_gsd:
         print("Step 3/3: Converting to GSD...")
-        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame)
+        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
 
     # Cleanup
     if not args.keep_images and os.path.isdir(images_folder):
@@ -223,7 +226,7 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args):
     print("Done!")
 
 
-def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args):
+def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version=1):
     import os
 
     parent = os.path.dirname(output_path)
@@ -252,7 +255,7 @@ def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args):
     # Step 2: Convert to GSD
     if not args.skip_gsd:
         print("Step 2/2: Converting to GSD...")
-        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame)
+        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
 
     # Cleanup PLY if not keeping
     if not args.keep_ply and os.path.isdir(ply_folder):
@@ -263,28 +266,42 @@ def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args):
     print("Done!")
 
 
-def _run_ply_cli(input_path, output_path, fps, start_frame, end_frame):
+def _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, gsd_version=1):
     print("Converting PLY to GSD...")
-    _convert_gsd(input_path, output_path, fps, start_frame, end_frame)
+    _convert_gsd(input_path, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
     print("Done!")
 
 
-def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame):
+def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=1):
     import os
-    from app.pipeline.ply_to_gsd import convert_ply_to_gsd
 
     sequence_name = os.path.splitext(os.path.basename(output_path))[0]
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    stats = convert_ply_to_gsd(
-        ply_folder=ply_folder,
-        output_path=output_path,
-        sequence_name=sequence_name,
-        target_fps=fps,
-        start_frame=start_frame,
-        end_frame=end_frame if end_frame is not None and end_frame >= 0 else None,
-        progress_callback=lambda msg: print(f"  {msg}"),
-    )
+    ef = end_frame if end_frame is not None and end_frame >= 0 else None
+
+    if gsd_version == 2:
+        from app.pipeline.ply_to_gsd_v2 import convert_ply_to_gsd_v2
+        stats = convert_ply_to_gsd_v2(
+            ply_folder=ply_folder,
+            output_path=output_path,
+            sequence_name=sequence_name,
+            target_fps=fps,
+            start_frame=start_frame,
+            end_frame=ef,
+            progress_callback=lambda msg: print(f"  {msg}"),
+        )
+    else:
+        from app.pipeline.ply_to_gsd import convert_ply_to_gsd
+        stats = convert_ply_to_gsd(
+            ply_folder=ply_folder,
+            output_path=output_path,
+            sequence_name=sequence_name,
+            target_fps=fps,
+            start_frame=start_frame,
+            end_frame=ef,
+            progress_callback=lambda msg: print(f"  {msg}"),
+        )
     return stats
 
 
@@ -312,6 +329,8 @@ def main():
         parser.add_argument("--keep-images", action="store_true", help="Keep extracted images (video mode)")
         parser.add_argument("--keep-ply", action="store_true", help="Keep PLY files (video/images mode)")
         parser.add_argument("--skip-gsd", action="store_true", help="Skip GSD, stop after PLY (video/images mode)")
+        parser.add_argument("--gsd-version", type=int, choices=[1, 2], default=1,
+                            help="GSD format version: 1=Shuffle+LZ4, 2=SHARP-VQ (default: 1)")
 
         args = parser.parse_args()
         main_cli(args)

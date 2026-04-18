@@ -96,10 +96,20 @@ def check_lz4() -> bool:
         return False
 
 
+def check_sklearn() -> bool:
+    """Check if scikit-learn is available (needed for GSD v2)."""
+    try:
+        import sklearn  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def check_all() -> dict[str, bool]:
     """Check all dependencies. Returns dict of name -> available."""
     return {
         "ffmpeg": check_ffmpeg(),
         "sharp": check_sharp(),
         "lz4": check_lz4(),
+        "sklearn": check_sklearn(),
     }

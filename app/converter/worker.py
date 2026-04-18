@@ -41,6 +41,7 @@ class PipelineWorker(QThread):
         keep_images: bool = True,
         keep_ply: bool = True,
         skip_gsd: bool = False,
+        gsd_version: int = 1,
         parent=None,
     ):
         super().__init__(parent)
@@ -54,6 +55,7 @@ class PipelineWorker(QThread):
         self.keep_images = keep_images
         self.keep_ply = keep_ply
         self.skip_gsd = skip_gsd
+        self.gsd_version = gsd_version
         self._stop_requested = False
         self.images_folder = None
         self.ply_folder = None
@@ -262,24 +264,39 @@ class PipelineWorker(QThread):
             self._active_process = None
 
     def _convert_to_gsd(self):
-        from app.pipeline.ply_to_gsd import convert_ply_to_gsd
-
         sequence_name = os.path.splitext(os.path.basename(self.output_path))[0]
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
 
         step_str = f", step {self.frame_step}" if self.frame_step > 1 else ""
-        self._log(f"Converting PLY → GSD at {self.fps} FPS (frames {self.start_frame}-{self.end_frame}{step_str})...")
-        convert_ply_to_gsd(
-            ply_folder=self.ply_folder,
-            output_path=self.output_path,
-            sequence_name=sequence_name,
-            target_fps=self.fps,
-            start_frame=self.start_frame,
-            end_frame=self.end_frame if self.end_frame >= 0 else None,
-            frame_step=self.frame_step,
-            progress_callback=self._log,
-            frame_progress_callback=self._frame_progress,
-        )
+        ver_str = f"v{self.gsd_version}"
+        self._log(f"Converting PLY → GSD {ver_str} at {self.fps} FPS (frames {self.start_frame}-{self.end_frame}{step_str})...")
+
+        if self.gsd_version == 2:
+            from app.pipeline.ply_to_gsd_v2 import convert_ply_to_gsd_v2
+            convert_ply_to_gsd_v2(
+                ply_folder=self.ply_folder,
+                output_path=self.output_path,
+                sequence_name=sequence_name,
+                target_fps=self.fps,
+                start_frame=self.start_frame,
+                end_frame=self.end_frame if self.end_frame >= 0 else None,
+                frame_step=self.frame_step,
+                progress_callback=self._log,
+                frame_progress_callback=self._frame_progress,
+            )
+        else:
+            from app.pipeline.ply_to_gsd import convert_ply_to_gsd
+            convert_ply_to_gsd(
+                ply_folder=self.ply_folder,
+                output_path=self.output_path,
+                sequence_name=sequence_name,
+                target_fps=self.fps,
+                start_frame=self.start_frame,
+                end_frame=self.end_frame if self.end_frame >= 0 else None,
+                frame_step=self.frame_step,
+                progress_callback=self._log,
+                frame_progress_callback=self._frame_progress,
+            )
 
     def _cleanup(self):
         """Delete intermediate folders based on keep flags."""
