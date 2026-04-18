@@ -42,6 +42,8 @@ class PipelineWorker(QThread):
         keep_ply: bool = True,
         skip_gsd: bool = False,
         gsd_version: int = 1,
+        use_gpu: bool = False,
+        assume_uniform_count: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -56,6 +58,8 @@ class PipelineWorker(QThread):
         self.keep_ply = keep_ply
         self.skip_gsd = skip_gsd
         self.gsd_version = gsd_version
+        self.use_gpu = use_gpu
+        self.assume_uniform_count = assume_uniform_count
         self._stop_requested = False
         self.images_folder = None
         self.ply_folder = None
@@ -281,6 +285,8 @@ class PipelineWorker(QThread):
                 start_frame=self.start_frame,
                 end_frame=self.end_frame if self.end_frame >= 0 else None,
                 frame_step=self.frame_step,
+                assume_uniform_count=self.assume_uniform_count,
+                use_gpu=self.use_gpu,
                 progress_callback=self._log,
                 frame_progress_callback=self._frame_progress,
             )
@@ -294,6 +300,7 @@ class PipelineWorker(QThread):
                 start_frame=self.start_frame,
                 end_frame=self.end_frame if self.end_frame >= 0 else None,
                 frame_step=self.frame_step,
+                assume_uniform_count=self.assume_uniform_count,
                 progress_callback=self._log,
                 frame_progress_callback=self._frame_progress,
             )

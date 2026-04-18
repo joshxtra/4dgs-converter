@@ -13,13 +13,14 @@ import re
 import struct
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 import numpy as np
 
 from app.utils.ply_reader import load_gaussian_ply
 from app.utils.morton import sort_3d_morton_order
+from app.utils.workers import default_workers
 from app.pipeline.ply_to_raw import (
     PRECISION_FULL,
     PRECISION_HALF,
@@ -75,6 +76,14 @@ def _process_single_frame(args: tuple) -> tuple[int, bytes, dict, int]:
         gaussians = _prune_by_contribution(gaussians, prune_keep_ratio)
     gaussian_count = len(gaussians["position"])
 
+    n_pixels = uniform_texture_size * uniform_texture_size
+    if gaussian_count > n_pixels:
+        raise RuntimeError(
+            f"Frame {frame_idx}: {gaussian_count} gaussians > texture capacity "
+            f"{n_pixels} ({uniform_texture_size}²). "
+            "Disable --assume-uniform or check your PLY files."
+        )
+
     sorted_indices, min_pos, max_pos = sort_3d_morton_order(gaussians["position"])
 
     texture_size = uniform_texture_size if uniform_texture_size else math.ceil(math.sqrt(gaussian_count))
@@ -107,6 +116,12 @@ def _process_single_frame(args: tuple) -> tuple[int, bytes, dict, int]:
     return frame_idx, compressed, frame_info, raw_size
 
 
+def _scan_one_ply(ply_path: str) -> int:
+    """Load a PLY and return its gaussian count. Used for parallel pre-scan."""
+    g = load_gaussian_ply(ply_path)
+    return len(g["position"])
+
+
 def convert_ply_to_gsd(
     ply_folder: str,
     output_path: str,
@@ -122,6 +137,7 @@ def convert_ply_to_gsd(
     start_frame: int = 0,
     end_frame: Optional[int] = None,
     frame_step: int = 1,
+    assume_uniform_count: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
     frame_progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
@@ -138,7 +154,9 @@ def convert_ply_to_gsd(
         scale_opacity_precision: PRECISION_FULL or PRECISION_HALF.
         sh_precision: PRECISION_FULL or PRECISION_HALF.
         prune_keep_ratio: If set, keep top N% by contribution (e.g. 0.5 for 50%).
-        max_workers: Max parallel workers (default: half of CPU cores).
+        max_workers: Max parallel workers (default: adaptive via default_workers()).
+        assume_uniform_count: Skip pre-scan; assume all frames have the same
+            gaussian count as the first PLY (faster for fixed-topology sequences).
         progress_callback: Callback for log messages.
         frame_progress_callback: Callback (current_frame, total_frames).
 
@@ -187,23 +205,40 @@ def convert_ply_to_gsd(
 
     # Determine worker count
     if max_workers is None:
-        cpu_count = os.cpu_count() or 4
-        max_workers = max(1, cpu_count // 2)
-    log(f"Using {max_workers} workers")
+        max_workers, reason = default_workers()
+        log(f"Using {max_workers} workers ({reason})")
+    else:
+        log(f"Using {max_workers} workers")
 
     # Pre-scan: find max gaussian count to compute uniform texture size
-    log("Pre-scanning PLY files for max gaussian count...")
-    max_gaussian_count = 0
-    for i, ply_file in enumerate(ply_files):
-        ply_path = os.path.join(ply_folder, ply_file)
-        g = load_gaussian_ply(ply_path)
-        n = len(g["position"])
+    if assume_uniform_count:
+        log("Skip pre-scan: using first PLY for gaussian count (--assume-uniform)")
+        first_path = os.path.join(ply_folder, ply_files[0])
+        g0 = load_gaussian_ply(first_path)
+        n0 = len(g0["position"])
         if prune_keep_ratio is not None and prune_keep_ratio < 1.0:
-            n = int(n * prune_keep_ratio)
-        if n > max_gaussian_count:
-            max_gaussian_count = n
+            n0 = int(n0 * prune_keep_ratio)
+        max_gaussian_count = n0
         if frame_progress_callback:
-            frame_progress_callback(i + 1, frame_count)
+            frame_progress_callback(frame_count, frame_count)
+    else:
+        log("Pre-scanning PLY files for max gaussian count (parallel)...")
+        ply_paths = [os.path.join(ply_folder, f) for f in ply_files]
+        scan_workers = min(16, frame_count)
+        max_gaussian_count = 0
+        completed_scan = 0
+        with ThreadPoolExecutor(max_workers=scan_workers) as tex:
+            scan_futures = {tex.submit(_scan_one_ply, p): i for i, p in enumerate(ply_paths)}
+            for fut in as_completed(scan_futures):
+                n = fut.result()
+                if prune_keep_ratio is not None and prune_keep_ratio < 1.0:
+                    n = int(n * prune_keep_ratio)
+                if n > max_gaussian_count:
+                    max_gaussian_count = n
+                completed_scan += 1
+                if frame_progress_callback:
+                    frame_progress_callback(completed_scan, frame_count)
+
     uniform_texture_size = math.ceil(math.sqrt(max_gaussian_count))
     log(f"Uniform texture size: {uniform_texture_size}x{uniform_texture_size} (max {max_gaussian_count:,} gaussians)")
 

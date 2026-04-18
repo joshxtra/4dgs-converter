@@ -140,12 +140,18 @@ def main_cli(args):
             output_path = os.path.join(parent, f"{folder_name}.gsd")
 
     gsd_version = args.gsd_version
+    use_gpu = args.use_gpu
+    assume_uniform = args.assume_uniform
 
     print(f"Mode: {mode}")
     print(f"Input: {input_path}")
     print(f"Output: {output_path}")
     print(f"FPS: {fps}")
     print(f"GSD version: v{gsd_version}")
+    if use_gpu:
+        print("GPU KMeans: enabled")
+    if assume_uniform:
+        print("Pre-scan: skipped (--assume-uniform)")
     if start_frame > 0 or end_frame is not None:
         print(f"Frame range: {start_frame}-{end_frame if end_frame is not None else 'end'}")
     print()
@@ -155,7 +161,7 @@ def main_cli(args):
     elif mode == "images":
         _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version)
     else:
-        _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, gsd_version)
+        _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version)
 
 
 def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version=1):
@@ -211,7 +217,8 @@ def _run_video_cli(input_path, output_path, fps, start_frame, end_frame, args, g
     # Step 3: Convert to GSD
     if not args.skip_gsd:
         print("Step 3/3: Converting to GSD...")
-        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
+        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version,
+                     use_gpu=args.use_gpu, assume_uniform=args.assume_uniform)
 
     # Cleanup
     if not args.keep_images and os.path.isdir(images_folder):
@@ -255,7 +262,8 @@ def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args, 
     # Step 2: Convert to GSD
     if not args.skip_gsd:
         print("Step 2/2: Converting to GSD...")
-        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
+        _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=gsd_version,
+                     use_gpu=args.use_gpu, assume_uniform=args.assume_uniform)
 
     # Cleanup PLY if not keeping
     if not args.keep_ply and os.path.isdir(ply_folder):
@@ -266,13 +274,15 @@ def _run_images_cli(input_path, output_path, fps, start_frame, end_frame, args, 
     print("Done!")
 
 
-def _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, gsd_version=1):
+def _run_ply_cli(input_path, output_path, fps, start_frame, end_frame, args, gsd_version=1):
     print("Converting PLY to GSD...")
-    _convert_gsd(input_path, output_path, fps, start_frame, end_frame, gsd_version=gsd_version)
+    _convert_gsd(input_path, output_path, fps, start_frame, end_frame, gsd_version=gsd_version,
+                 use_gpu=args.use_gpu, assume_uniform=args.assume_uniform)
     print("Done!")
 
 
-def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=1):
+def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_version=1,
+                 use_gpu=False, assume_uniform=False):
     import os
 
     sequence_name = os.path.splitext(os.path.basename(output_path))[0]
@@ -289,6 +299,8 @@ def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_versi
             target_fps=fps,
             start_frame=start_frame,
             end_frame=ef,
+            assume_uniform_count=assume_uniform,
+            use_gpu=use_gpu,
             progress_callback=lambda msg: print(f"  {msg}"),
         )
     else:
@@ -300,6 +312,7 @@ def _convert_gsd(ply_folder, output_path, fps, start_frame, end_frame, gsd_versi
             target_fps=fps,
             start_frame=start_frame,
             end_frame=ef,
+            assume_uniform_count=assume_uniform,
             progress_callback=lambda msg: print(f"  {msg}"),
         )
     return stats
@@ -331,6 +344,10 @@ def main():
         parser.add_argument("--skip-gsd", action="store_true", help="Skip GSD, stop after PLY (video/images mode)")
         parser.add_argument("--gsd-version", type=int, choices=[1, 2], default=1,
                             help="GSD format version: 1=Shuffle+LZ4, 2=SHARP-VQ (default: 1)")
+        parser.add_argument("--use-gpu", action="store_true",
+                            help="Use GPU KMeans for v2 (requires PyTorch with CUDA)")
+        parser.add_argument("--assume-uniform", action="store_true",
+                            help="Skip pre-scan; assume all PLYs have the same gaussian count (v2+v1)")
 
         args = parser.parse_args()
         main_cli(args)

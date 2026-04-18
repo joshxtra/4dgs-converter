@@ -3,3 +3,4 @@ Pillow
 PySide6
 lz4
 scikit-learn
+psutil

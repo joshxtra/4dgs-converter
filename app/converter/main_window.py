@@ -241,6 +241,22 @@ class MainWindow(QMainWindow):
         gsd_ver_row.addStretch()
         layout.addLayout(gsd_ver_row)
 
+        # -- v2 options row
+        v2_opts_row = QHBoxLayout()
+        has_cuda = self._env.get("cuda", False)
+        self.chk_use_gpu = QCheckBox("Use GPU (v2)")
+        self.chk_use_gpu.setChecked(has_cuda)
+        self.chk_use_gpu.setEnabled(has_cuda)
+        if not has_cuda:
+            self.chk_use_gpu.setToolTip("Requires PyTorch with CUDA (torch.cuda.is_available())")
+        self.chk_assume_uniform = QCheckBox("All frames have same point count (skip pre-scan)")
+        v2_opts_row.addWidget(self.chk_use_gpu)
+        v2_opts_row.addWidget(self.chk_assume_uniform)
+        v2_opts_row.addStretch()
+        self._v2_opts_row_widget = QWidget()
+        self._v2_opts_row_widget.setLayout(v2_opts_row)
+        layout.addWidget(self._v2_opts_row_widget)
+
         # -- Checkboxes
         self.chk_keep_images = QCheckBox("Keep image sequence")
         self.chk_keep_images.setChecked(True)
@@ -302,20 +318,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_text)
 
         # -- Environment status bar
+        installable = {"ffmpeg", "sharp", "lz4", "sklearn"}
+        _tooltips = {
+            "sharp": (
+                "sharp not found in current Python environment.\n"
+                "Click Install to install here, or activate\n"
+                "the environment where sharp is installed."
+            ),
+            "cuda": "PyTorch with CUDA not detected. GPU KMeans for v2 will be unavailable.",
+        }
         env_row = QHBoxLayout()
         env_row.addWidget(QLabel("Environment:"))
         for name, available in self._env.items():
             icon = "\u2713" if available else "\u2717"
-            color = "green" if available else "red"
+            color = "green" if available else ("gray" if name == "cuda" else "red")
             lbl = QLabel(f'<span style="color:{color}">{icon}</span> {name}')
-            if not available and name == "sharp":
-                lbl.setToolTip(
-                    "sharp not found in current Python environment.\n"
-                    "Click Install to install here, or activate\n"
-                    "the environment where sharp is installed."
-                )
+            if not available and name in _tooltips:
+                lbl.setToolTip(_tooltips[name])
             env_row.addWidget(lbl)
-            if not available:
+            if not available and name in installable:
                 install_btn = QPushButton("Install")
                 install_btn.setFixedHeight(22)
                 install_btn.setFixedWidth(50)
@@ -845,6 +866,8 @@ class MainWindow(QMainWindow):
             keep_ply=self.chk_keep_ply.isChecked(),
             skip_gsd=self.chk_skip_gsd.isChecked(),
             gsd_version=self._gsd_version,
+            use_gpu=self.chk_use_gpu.isChecked(),
+            assume_uniform_count=self.chk_assume_uniform.isChecked(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.frame_progress.connect(self._on_frame_progress)
@@ -878,6 +901,9 @@ class MainWindow(QMainWindow):
         self._gsd_v1_btn.setEnabled(not running)
         has_sklearn = self._env.get("sklearn", False)
         self._gsd_v2_btn.setEnabled(not running and has_sklearn)
+        has_cuda = self._env.get("cuda", False)
+        self.chk_use_gpu.setEnabled(not running and has_cuda)
+        self.chk_assume_uniform.setEnabled(not running)
 
     # -------------------------------------------------------- Signal handlers
     def _on_progress(self, step: int, total: int, label: str):

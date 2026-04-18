@@ -9,6 +9,9 @@ SHARP-optimized encoding:
 
 File structure: GSD1 magic + JSON header + sequential frame blobs.
 Each frame blob: codebooks + LZ4-compressed sections.
+
+GPU path: workers return raw arrays; main process runs GPU KMeans.
+CPU path: workers run sklearn MiniBatchKMeans inline (legacy, unchanged).
 """
 
 import json
@@ -18,14 +21,14 @@ import re
 import struct
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 import numpy as np
-from sklearn.cluster import MiniBatchKMeans
 
 from app.utils.ply_reader import load_gaussian_ply
 from app.utils.morton import sort_3d_morton_order
+from app.utils.workers import default_workers
 
 try:
     import lz4.block
@@ -42,8 +45,9 @@ def _pixel_shuffle(data: bytes, bytes_per_pixel: int) -> bytes:
     return arr.reshape(-1, bytes_per_pixel).T.reshape(-1).tobytes()
 
 
-def _vq_encode(data: np.ndarray, k: int = VQ_K, n_sample: int = 50000) -> tuple:
-    """Vector quantize. Returns (codebook float32, indices uint8)."""
+def _vq_encode_cpu(data: np.ndarray, k: int = VQ_K, n_sample: int = 50000) -> tuple:
+    """Vector quantize on CPU via sklearn. Returns (codebook float32, indices uint8)."""
+    from sklearn.cluster import MiniBatchKMeans
     n = len(data)
     sample_idx = np.random.choice(n, min(n_sample, n), replace=False)
     km = MiniBatchKMeans(n_clusters=k, batch_size=2048, n_init=3, random_state=42)
@@ -53,8 +57,8 @@ def _vq_encode(data: np.ndarray, k: int = VQ_K, n_sample: int = 50000) -> tuple:
     return codebook, indices
 
 
-def _process_single_frame_v2(args: tuple) -> tuple:
-    """Process a single PLY frame into a V2 compressed blob."""
+def _prepare_frame_v2(args: tuple) -> tuple:
+    """Load, sort, pad, activate. Returns raw arrays for VQ (GPU or CPU path)."""
     (frame_idx, ply_path, uniform_texture_size) = args
 
     gaussians = load_gaussian_ply(ply_path)
@@ -64,24 +68,27 @@ def _process_single_frame_v2(args: tuple) -> tuple:
     texture_size = uniform_texture_size or math.ceil(math.sqrt(n_gauss))
     n_pixels = texture_size * texture_size
 
+    if n_gauss > n_pixels:
+        raise RuntimeError(
+            f"Frame {frame_idx}: {n_gauss} gaussians > texture capacity "
+            f"{n_pixels} ({texture_size}²). "
+            "Disable --assume-uniform or check your PLY files."
+        )
+
     idx = sorted_indices
 
-    # Extract and prepare attributes
     pos = gaussians["position"][idx].astype(np.float32)
     rot = gaussians["rotation"][idx].astype(np.float32)
     scale_raw = gaussians["scale"][idx].astype(np.float32)
     opacity_raw = gaussians["opacity"][idx].astype(np.float32)
     sh_dc = gaussians["sh_dc"][idx].astype(np.float32)
 
-    # Normalize rotation
     rot_norm = np.linalg.norm(rot, axis=1, keepdims=True)
     rot_norm = np.where(rot_norm == 0, 1.0, rot_norm)
     rot = rot / rot_norm
 
-    # Activate opacity
     opacity_act = (1.0 / (1.0 + np.exp(-opacity_raw))).astype(np.float32)
 
-    # --- Pad to texture size ---
     def pad_2d(arr, target_n):
         if len(arr) >= target_n:
             return arr[:target_n]
@@ -94,49 +101,58 @@ def _process_single_frame_v2(args: tuple) -> tuple:
         pad = np.zeros(target_n - len(arr), dtype=arr.dtype)
         return np.concatenate([arr, pad])
 
-    pos = pad_2d(pos, n_pixels)        # (P, 3)
-    rot = pad_2d(rot, n_pixels)        # (P, 4)
-    scale_raw = pad_2d(scale_raw, n_pixels)  # (P, 3)
-    opacity_act = pad_1d(opacity_act, n_pixels)  # (P,)
-    sh_dc = pad_2d(sh_dc, n_pixels)    # (P, 3)
+    pos = pad_2d(pos, n_pixels)
+    rot = pad_2d(rot, n_pixels)
+    scale_raw = pad_2d(scale_raw, n_pixels)
+    opacity_act = pad_1d(opacity_act, n_pixels)
+    sh_dc = pad_2d(sh_dc, n_pixels)
 
-    # Pad rotation: unused pixels get identity quat (0,0,0,1) in raw form
     if n_gauss < n_pixels:
         rot[n_gauss:] = [0, 0, 0, 1]
 
-    # --- Encode ---
-
-    # Position: fp16 × 4 (RGBA, A=0) for compatibility with V1 texture format
-    # Pack as (Z, X, -Y, 0) matching V1 layout
     pos_rgba = np.zeros((n_pixels, 4), dtype=np.float16)
-    pos_rgba[:, 0] = pos[:, 2].astype(np.float16)   # R = Z
-    pos_rgba[:, 1] = pos[:, 0].astype(np.float16)   # G = X
-    pos_rgba[:, 2] = (-pos[:, 1]).astype(np.float16) # B = -Y
+    pos_rgba[:, 0] = pos[:, 2].astype(np.float16)
+    pos_rgba[:, 1] = pos[:, 0].astype(np.float16)
+    pos_rgba[:, 2] = (-pos[:, 1]).astype(np.float16)
     pos_fp16 = pos_rgba.tobytes()
-    pos_shuffled = _pixel_shuffle(pos_fp16, 8)  # 4 × fp16 = 8 bpp
+    pos_shuffled = _pixel_shuffle(pos_fp16, 8)
     pos_compressed = lz4.block.compress(pos_shuffled, store_size=False)
 
-    # Rotation: VQ K=256
-    rot_codebook, rot_indices = _vq_encode(rot, VQ_K)
-    rot_compressed = lz4.block.compress(rot_indices.tobytes(), store_size=False)
-
-    # Scale: VQ K=256
-    sc_codebook, sc_indices = _vq_encode(scale_raw, VQ_K)
-    sc_compressed = lz4.block.compress(sc_indices.tobytes(), store_size=False)
-
-    # Opacity: uint8
     op_uint8 = (np.clip(opacity_act, 0, 1) * 255).astype(np.uint8)
     op_compressed = lz4.block.compress(op_uint8.tobytes(), store_size=False)
 
-    # SH DC: VQ K=256
-    sh_codebook, sh_indices = _vq_encode(sh_dc, VQ_K)
-    sh_compressed = lz4.block.compress(sh_indices.tobytes(), store_size=False)
+    meta = {
+        "frame_idx": frame_idx,
+        "texture_size": texture_size,
+        "n_gauss": n_gauss,
+        "min_pos": min_pos,
+        "max_pos": max_pos,
+        "pos_compressed": pos_compressed,
+        "op_compressed": op_compressed,
+    }
 
-    # --- Pack blob ---
-    # Codebooks (raw, not compressed)
-    rot_cb_bytes = rot_codebook.tobytes()   # K × 4 × 4 bytes
-    sc_cb_bytes = sc_codebook.tobytes()     # K × 3 × 4 bytes
-    sh_cb_bytes = sh_codebook.tobytes()     # K × 3 × 4 bytes
+    return frame_idx, rot, scale_raw, sh_dc, meta
+
+
+def _finalize_frame_v2(
+    rot_codebook, rot_indices,
+    sc_codebook, sc_indices,
+    sh_codebook, sh_indices,
+    meta: dict,
+) -> tuple:
+    """Pack codebooks + indices + pos/opacity into a frame blob."""
+    texture_size = meta["texture_size"]
+    n_gauss = meta["n_gauss"]
+    pos_compressed = meta["pos_compressed"]
+    op_compressed = meta["op_compressed"]
+
+    rot_cb_bytes = rot_codebook.tobytes()
+    sc_cb_bytes = sc_codebook.tobytes()
+    sh_cb_bytes = sh_codebook.tobytes()
+
+    rot_compressed = lz4.block.compress(rot_indices.tobytes(), store_size=False)
+    sc_compressed = lz4.block.compress(sc_indices.tobytes(), store_size=False)
+    sh_compressed = lz4.block.compress(sh_indices.tobytes(), store_size=False)
 
     section_header = struct.pack("<IIIIIIII",
         len(rot_cb_bytes),
@@ -161,19 +177,42 @@ def _process_single_frame_v2(args: tuple) -> tuple:
         sh_compressed,
     ])
 
-    # Raw size for comparison (V1-equivalent)
-    raw_size = n_pixels * (8 + 8 + 8 + 8)  # pos fp16×4 + rot fp16×4 + so fp16×4 + sh fp16×4
+    n_pixels = texture_size * texture_size
+    raw_size = n_pixels * (8 + 8 + 8 + 8)
 
     frame_info = {
         "compressedSize": len(blob),
         "textureWidth": texture_size,
         "textureHeight": texture_size,
         "gaussianCount": n_gauss,
-        "minPosition": {"x": float(min_pos[0]), "y": float(min_pos[1]), "z": float(min_pos[2])},
-        "maxPosition": {"x": float(max_pos[0]), "y": float(max_pos[1]), "z": float(max_pos[2])},
+        "minPosition": {"x": float(meta["min_pos"][0]), "y": float(meta["min_pos"][1]), "z": float(meta["min_pos"][2])},
+        "maxPosition": {"x": float(meta["max_pos"][0]), "y": float(meta["max_pos"][1]), "z": float(meta["max_pos"][2])},
     }
 
+    return blob, frame_info, raw_size
+
+
+def _process_single_frame_v2_cpu(args: tuple) -> tuple:
+    """CPU path: prepare + VQ_cpu + finalize, all in the worker process."""
+    frame_idx, rot, scale_raw, sh_dc, meta = _prepare_frame_v2(args)
+
+    rot_codebook, rot_indices = _vq_encode_cpu(rot, VQ_K)
+    sc_codebook, sc_indices = _vq_encode_cpu(scale_raw, VQ_K)
+    sh_codebook, sh_indices = _vq_encode_cpu(sh_dc, VQ_K)
+
+    blob, frame_info, raw_size = _finalize_frame_v2(
+        rot_codebook, rot_indices,
+        sc_codebook, sc_indices,
+        sh_codebook, sh_indices,
+        meta,
+    )
     return frame_idx, blob, frame_info, raw_size
+
+
+def _scan_one_ply(ply_path: str) -> int:
+    """Load a PLY and return its gaussian count. Used for parallel pre-scan."""
+    g = load_gaussian_ply(ply_path)
+    return len(g["position"])
 
 
 def convert_ply_to_gsd_v2(
@@ -185,10 +224,18 @@ def convert_ply_to_gsd_v2(
     start_frame: int = 0,
     end_frame: Optional[int] = None,
     frame_step: int = 1,
+    assume_uniform_count: bool = False,
+    use_gpu: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
     frame_progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
-    """Convert PLY folder to GSD v2 (SHARP-VQ format)."""
+    """Convert PLY folder to GSD v2 (SHARP-VQ format).
+
+    Args:
+        assume_uniform_count: Skip full pre-scan; use first PLY gaussian count for all frames.
+        use_gpu: Use GPU KMeans (PyTorch CUDA) instead of sklearn. Falls back to CPU if
+            CUDA is not available.
+    """
     def log(msg: str):
         if progress_callback:
             progress_callback(msg)
@@ -219,19 +266,47 @@ def convert_ply_to_gsd_v2(
 
     # Workers
     if max_workers is None:
-        cpu_count = os.cpu_count() or 4
-        max_workers = max(1, cpu_count // 2)
-    log(f"Using {max_workers} workers")
+        max_workers, reason = default_workers()
+        log(f"Using {max_workers} workers ({reason})")
+    else:
+        log(f"Using {max_workers} workers")
+
+    # Resolve GPU
+    gpu_active = False
+    if use_gpu:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                from app.utils.gpu_kmeans import gpu_kmeans as _gpu_kmeans
+                gpu_active = True
+                log(f"GPU KMeans enabled ({torch.cuda.get_device_name(0)})")
+            else:
+                log("GPU KMeans requested but CUDA not available — falling back to CPU")
+        except ImportError:
+            log("GPU KMeans requested but PyTorch not installed — falling back to CPU")
 
     # Pre-scan for uniform texture size
-    log("Pre-scanning for max gaussian count...")
-    max_gaussian_count = 0
-    for i, ply_file in enumerate(ply_files):
-        g = load_gaussian_ply(os.path.join(ply_folder, ply_file))
-        n = len(g["position"])
-        max_gaussian_count = max(max_gaussian_count, n)
-        if frame_progress_callback and (i + 1) % 20 == 0:
-            frame_progress_callback(i + 1, frame_count)
+    if assume_uniform_count:
+        log("Skip pre-scan: using first PLY for gaussian count (--assume-uniform)")
+        g0 = load_gaussian_ply(os.path.join(ply_folder, ply_files[0]))
+        max_gaussian_count = len(g0["position"])
+        if frame_progress_callback:
+            frame_progress_callback(frame_count, frame_count)
+    else:
+        log("Pre-scanning for max gaussian count (parallel)...")
+        ply_paths = [os.path.join(ply_folder, f) for f in ply_files]
+        scan_workers = min(16, frame_count)
+        max_gaussian_count = 0
+        completed_scan = 0
+        with ThreadPoolExecutor(max_workers=scan_workers) as tex:
+            scan_futures = {tex.submit(_scan_one_ply, p): i for i, p in enumerate(ply_paths)}
+            for fut in as_completed(scan_futures):
+                n = fut.result()
+                if n > max_gaussian_count:
+                    max_gaussian_count = n
+                completed_scan += 1
+                if frame_progress_callback:
+                    frame_progress_callback(completed_scan, frame_count)
 
     uniform_texture_size = math.ceil(math.sqrt(max_gaussian_count))
     log(f"Uniform texture: {uniform_texture_size}x{uniform_texture_size} ({max_gaussian_count:,} gaussians)")
@@ -249,29 +324,62 @@ def convert_ply_to_gsd_v2(
     total_raw = 0
     total_compressed = 0
 
-    executor = ProcessPoolExecutor(max_workers=max_workers)
-    try:
-        futures = {
-            executor.submit(_process_single_frame_v2, args): args[0]
-            for args in task_args
-        }
-        for future in as_completed(futures):
-            frame_idx, blob, frame_info, raw_size = future.result()
-            results[frame_idx] = (blob, frame_info, raw_size)
-            completed += 1
-            total_raw += raw_size
-            total_compressed += len(blob)
+    if gpu_active:
+        # GPU path: workers prepare arrays, main process runs GPU KMeans
+        worker_fn = _prepare_frame_v2
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        try:
+            futures = {executor.submit(worker_fn, args): args[0] for args in task_args}
+            for future in as_completed(futures):
+                frame_idx, rot, scale_raw, sh_dc, meta = future.result()
 
-            if frame_progress_callback:
-                frame_progress_callback(completed, frame_count)
-            if completed % 50 == 0 or completed == frame_count:
-                ratio = total_compressed / total_raw * 100
-                log(f"  Encoded {completed}/{frame_count} ({ratio:.1f}%)")
-    except Exception:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
+                rot_cb, rot_idx = _gpu_kmeans(rot, VQ_K)
+                sc_cb, sc_idx = _gpu_kmeans(scale_raw, VQ_K)
+                sh_cb, sh_idx = _gpu_kmeans(sh_dc, VQ_K)
+
+                blob, frame_info, raw_size = _finalize_frame_v2(
+                    rot_cb, rot_idx, sc_cb, sc_idx, sh_cb, sh_idx, meta
+                )
+                results[frame_idx] = (blob, frame_info, raw_size)
+                completed += 1
+                total_raw += raw_size
+                total_compressed += len(blob)
+
+                if frame_progress_callback:
+                    frame_progress_callback(completed, frame_count)
+                if completed % 50 == 0 or completed == frame_count:
+                    ratio = total_compressed / total_raw * 100
+                    log(f"  Encoded {completed}/{frame_count} ({ratio:.1f}%) [GPU]")
+        except Exception:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
     else:
-        executor.shutdown(wait=True)
+        # CPU path: full encode in worker process
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        try:
+            futures = {
+                executor.submit(_process_single_frame_v2_cpu, args): args[0]
+                for args in task_args
+            }
+            for future in as_completed(futures):
+                frame_idx, blob, frame_info, raw_size = future.result()
+                results[frame_idx] = (blob, frame_info, raw_size)
+                completed += 1
+                total_raw += raw_size
+                total_compressed += len(blob)
+
+                if frame_progress_callback:
+                    frame_progress_callback(completed, frame_count)
+                if completed % 50 == 0 or completed == frame_count:
+                    ratio = total_compressed / total_raw * 100
+                    log(f"  Encoded {completed}/{frame_count} ({ratio:.1f}%)")
+        except Exception:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     encode_time = time.time() - t0
 
@@ -347,7 +455,9 @@ if __name__ == "__main__":
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=None)
     parser.add_argument("--step", type=int, default=1)
-    parser.add_argument("--vq-k", type=int, default=None, help="VQ codebook size (default: 4096)")
+    parser.add_argument("--use-gpu", action="store_true", help="Use GPU KMeans (PyTorch CUDA)")
+    parser.add_argument("--assume-uniform", action="store_true", help="Skip pre-scan, use first PLY for gaussian count")
+    parser.add_argument("--vq-k", type=int, default=None, help="VQ codebook size")
     args = parser.parse_args()
 
     if args.vq_k is not None:
@@ -358,4 +468,5 @@ if __name__ == "__main__":
         args.ply_folder, args.output, args.name,
         target_fps=args.fps, max_workers=args.workers,
         start_frame=args.start, end_frame=args.end, frame_step=args.step,
+        use_gpu=args.use_gpu, assume_uniform_count=args.assume_uniform,
     )

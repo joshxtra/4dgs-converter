@@ -105,6 +105,15 @@ def check_sklearn() -> bool:
         return False
 
 
+def check_torch_cuda() -> bool:
+    """Check if PyTorch with CUDA is available (GPU KMeans for GSD v2)."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 def check_all() -> dict[str, bool]:
     """Check all dependencies. Returns dict of name -> available."""
     return {
@@ -112,4 +121,5 @@ def check_all() -> dict[str, bool]:
         "sharp": check_sharp(),
         "lz4": check_lz4(),
         "sklearn": check_sklearn(),
+        "cuda": check_torch_cuda(),
     }
